@@ -2,6 +2,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $corePath = Join-Path $projectRoot "services\core"
 $ragPath = Join-Path $projectRoot "services\rag"
+$feishuPath = Join-Path $projectRoot "services\collectors\feishu"
 $webPath = Join-Path $projectRoot "apps\web"
 $nginxPath = Join-Path $projectRoot "gateway\nginx"
 $nginxRuntime = "C:\info-agent-nginx"
@@ -111,9 +112,16 @@ if (-not (Test-Path (Join-Path $ragRuntime 'uvicorn')) -or $installedHash -ne $r
 
 Import-EnvFile (Join-Path $corePath '.env')
 Import-EnvFile (Join-Path $ragPath '.env')
+if (-not $env:COLLECTOR_DATABASE_URL -and $env:CORE_DATABASE_URL) { $env:COLLECTOR_DATABASE_URL = $env:CORE_DATABASE_URL }
 
 Start-ServiceWindow 'info-agent core :8080' $corePath "& '$go' run ./cmd/server"
 Start-ServiceWindow 'info-agent rag :8000' $ragPath "`$env:PYTHONPATH = '$ragRuntime'; & '$python' -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+Start-ServiceWindow 'info-agent wechat collector :8100' $projectRoot "`$env:PYTHONPATH = '$ragRuntime;$projectRoot'; & '$python' -m uvicorn services.collectors.wechat.service:app --host 127.0.0.1 --port 8100"
+if ($env:FEISHU_SOURCE_ACCOUNT_ID -and $env:COLLECTOR_DATABASE_URL) {
+    Start-ServiceWindow 'info-agent feishu collector' $feishuPath "& '$go' run . --watch"
+} else {
+    Write-Warning 'FEISHU_SOURCE_ACCOUNT_ID or COLLECTOR_DATABASE_URL is missing; Feishu collector was skipped.'
+}
 Start-ServiceWindow 'info-agent web :5173' $webPath "& '$npm' run dev -- --host 0.0.0.0"
 
 if ($nginx) {

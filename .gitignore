@@ -9,3 +9,5 @@ __pycache__/
 .deps311/
 .runtime/
 .idea/
+data/
+services/collectors/feishu/data/

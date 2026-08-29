@@ -18,9 +18,26 @@ services:
     expose:
       - "8080"
 
+  feishu-collector:
+    build: ../services/collectors/feishu
+    environment:
+      FEISHU_WORKER_ENABLED: ${FEISHU_WORKER_ENABLED:-true}
+      FEISHU_POLL_INTERVAL: ${FEISHU_POLL_INTERVAL:-60}
+      FEISHU_PAGE_SIZE: ${FEISHU_PAGE_SIZE:-50}
+      FEISHU_SOURCE_ACCOUNT_ID: ${FEISHU_SOURCE_ACCOUNT_ID:-}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      COLLECTOR_DATABASE_URL: ${COLLECTOR_DATABASE_URL:-postgresql://127.0.0.1:5432/info_agent}
+      CORE_REDIS_URL: ${CORE_REDIS_URL:-redis://127.0.0.1:6379/1}
+      CORE_REDIS_DATABASE: ${CORE_REDIS_DATABASE:-1}
+    depends_on:
+      - core-service
+
   rag-service:
     build: ../services/rag
     environment:
+      RAG_DATABASE_URL: ${RAG_DATABASE_URL:-}
+      RAG_VECTOR_DIMENSION: ${RAG_VECTOR_DIMENSION:-1536}
       ELASTICSEARCH_URL: http://elasticsearch:9200
       ELASTICSEARCH_USERNAME: ${ELASTICSEARCH_USERNAME:-}
       ELASTICSEARCH_PASSWORD: ${ELASTICSEARCH_PASSWORD:-}

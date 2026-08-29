@@ -6,6 +6,16 @@
   "mappings": {
     "properties": {
       "content": { "type": "text" },
+      "chunk_id": { "type": "keyword" },
+      "message_id": { "type": "keyword" },
+      "source": { "type": "keyword" },
+      "source_account_id": { "type": "keyword" },
+      "source_message_id": { "type": "keyword" },
+      "conversation_id": { "type": "keyword" },
+      "sender_id": { "type": "keyword" },
+      "chunk_position": { "type": "integer" },
+      "message_type": { "type": "keyword" },
+      "metadata": { "type": "object", "enabled": false },
       "embedding": {
         "type": "dense_vector",
         "index": true,
@@ -16,7 +26,7 @@
       "organization_id": { "type": "keyword" },
       "source_type": { "type": "keyword" },
       "source_position": { "type": "keyword" },
-      "created_at": { "type": "date" }
+      "occurred_at": { "type": "date" }
     }
   }
 }
