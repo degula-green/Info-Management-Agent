@@ -47,13 +47,35 @@ function Import-EnvFile([string]$Path) {
 
 $go = Find-Tool 'go' @('C:\Program Files\Go\bin\go.exe')
 $npm = Find-Tool 'npm'
-$uv = Find-Tool 'uv'
-$python = Find-Tool 'python' @('C:\Program Files\Python311\python.exe')
+$pythonCandidates = @('C:\Program Files\Python311\python.exe')
+if ($env:USERPROFILE) {
+    $pythonCandidates += Join-Path $env:USERPROFILE 'AppData\Local\Programs\Python\Python314\python.exe'
+}
+$python = Find-Tool 'python' $pythonCandidates
+$uvCandidates = @()
+if ($env:USERPROFILE) {
+    $uvCandidates += Join-Path $env:USERPROFILE '.local\bin\uv.exe'
+    $uvCandidates += Get-ChildItem -Path (Join-Path $env:USERPROFILE 'AppData\Roaming\Python') -Filter 'uv.exe' -File -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty FullName
+}
+if ($env:APPDATA) {
+    $pythonUserRoot = Join-Path $env:APPDATA 'Python'
+    if (Test-Path $pythonUserRoot) {
+        $uvCandidates += Get-ChildItem -Path $pythonUserRoot -Filter 'uv.exe' -File -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty FullName
+    }
+}
+if ($python) {
+    $pythonUserScripts = & $python -c "import sysconfig; print(sysconfig.get_path('scripts', 'nt_user') or '')" 2>$null
+    if ($pythonUserScripts) {
+        $uvCandidates += Join-Path $pythonUserScripts.Trim() 'uv.exe'
+    }
+}
+$uv = Find-Tool 'uv' $uvCandidates
 $nginx = Find-Tool 'nginx'
 
 if (-not $go) { throw "Go not found. Install Go first." }
 if (-not $npm) { throw "npm not found. Install Node.js first." }
-if (-not $uv) { throw "uv not found. Install uv first." }
 if (-not $python) { throw "Python not found. Install Python 3.11 first." }
 
 if (-not (Test-Path (Join-Path $webPath 'node_modules'))) {
@@ -74,10 +96,16 @@ $installedHash = if (Test-Path $ragRequirementsStamp) {
     ''
 }
 if (-not (Test-Path (Join-Path $ragRuntime 'uvicorn')) -or $installedHash -ne $requirementsHash) {
-    Write-Host 'Installing RAG dependencies with uv...'
     New-Item -ItemType Directory -Force -Path $ragRuntime | Out-Null
-    & $uv pip install --python $python --target $ragRuntime --link-mode copy --upgrade --requirement $ragRequirements
-    if ($LASTEXITCODE -ne 0) { throw "uv pip install failed with exit code $LASTEXITCODE." }
+    if ($uv) {
+        Write-Host 'Installing RAG dependencies with uv...'
+        & $uv pip install --python $python --target $ragRuntime --link-mode copy --upgrade --requirement $ragRequirements
+        if ($LASTEXITCODE -ne 0) { throw "uv pip install failed with exit code $LASTEXITCODE." }
+    } else {
+        Write-Warning 'uv not found; installing RAG dependencies with Python pip.'
+        & $python -m pip install --target $ragRuntime --upgrade --requirement $ragRequirements
+        if ($LASTEXITCODE -ne 0) { throw "pip install failed with exit code $LASTEXITCODE." }
+    }
     Set-Content -LiteralPath $ragRequirementsStamp -Value $requirementsHash -Encoding ascii
 }
 
