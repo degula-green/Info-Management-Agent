@@ -30,8 +30,11 @@ services:
       COLLECTOR_DATABASE_URL: ${COLLECTOR_DATABASE_URL:-postgresql://127.0.0.1:5432/info_agent}
       CORE_REDIS_URL: ${CORE_REDIS_URL:-redis://127.0.0.1:6379/1}
       CORE_REDIS_DATABASE: ${CORE_REDIS_DATABASE:-1}
+      MESSAGE_VALUE_EVALUATOR_URL: ${MESSAGE_VALUE_EVALUATOR_URL:-http://rag-service:8000/evaluate/message}
+      MESSAGE_VALUE_TIMEOUT_SECONDS: ${MESSAGE_VALUE_TIMEOUT_SECONDS:-10}
     depends_on:
       - core-service
+      - rag-service
 
   rag-service:
     build: ../services/rag
@@ -41,6 +44,11 @@ services:
       ELASTICSEARCH_URL: http://elasticsearch:9200
       ELASTICSEARCH_USERNAME: ${ELASTICSEARCH_USERNAME:-}
       ELASTICSEARCH_PASSWORD: ${ELASTICSEARCH_PASSWORD:-}
+      MESSAGE_VALUE_ENABLED: ${MESSAGE_VALUE_ENABLED:-true}
+      MESSAGE_VALUE_API_BASE_URL: ${MESSAGE_VALUE_API_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      MESSAGE_VALUE_API_KEY: ${MESSAGE_VALUE_API_KEY:-}
+      MESSAGE_VALUE_MODEL: ${MESSAGE_VALUE_MODEL:-qwen-plus}
+      MESSAGE_VALUE_TIMEOUT_SECONDS: ${MESSAGE_VALUE_TIMEOUT_SECONDS:-10}
     expose:
       - "8000"
     depends_on:

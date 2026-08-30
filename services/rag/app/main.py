@@ -5,6 +5,7 @@ from typing import Any
 from app.config import settings
 from app.routers import health, search
 from app.services.index_service import index_chunks
+from app.services.message_value import MessageValueEvaluator
 from app.services.vectorization import EmbeddingClient, VectorizationPipeline
 from app.services.pgvector_store import PgVectorStore
 from app.services.worker import VectorizationWorker
@@ -13,6 +14,7 @@ app = FastAPI(title="info-agent-rag", version="0.1.0")
 app.include_router(health.router)
 app.include_router(search.router)
 worker: VectorizationWorker | None = None
+message_value_evaluator = MessageValueEvaluator()
 
 
 @app.on_event("startup")
@@ -31,6 +33,17 @@ def stop_worker() -> None:
 
 class IngestRequest(BaseModel):
     messages: list[dict[str, Any]]
+
+
+class MessageValueRequest(BaseModel):
+    source: str = "unknown"
+    message: dict[str, Any]
+
+
+@app.post("/evaluate/message")
+def evaluate_message(request: MessageValueRequest) -> dict[str, Any]:
+    decision = message_value_evaluator.evaluate(request.source, request.message)
+    return decision.to_dict()
 
 
 @app.post("/ingest")

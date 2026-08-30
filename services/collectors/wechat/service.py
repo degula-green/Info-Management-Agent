@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from wechatauto import WeChatDB
 
+from services.collectors.value_judgment import MessageValueClient
 from services.collectors.wechat.repository import WeChatRepository, occurred_at
 
 
@@ -20,8 +21,8 @@ class BindRequest(BaseModel):
 
 
 class WeChatWorker:
-    def __init__(self, repo: WeChatRepository, db: Any, binding: dict[str, Any], interval: float = 5):
-        self.repo, self.db, self.binding, self.interval = repo, db, binding, interval
+    def __init__(self, repo: WeChatRepository, db: Any, binding: dict[str, Any], interval: float = 5, evaluator: Any = None):
+        self.repo, self.db, self.binding, self.interval, self.evaluator = repo, db, binding, interval, evaluator
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
         self.status = "stopped"
@@ -85,6 +86,11 @@ class WeChatWorker:
                     max_seq = max(max_seq, raw_seq)
                     when = occurred_at(raw.get("create_time"))
                     if when and when < bound_at: continue
+                    evaluation_message = {**raw, "chat_id": chat_id}
+                    if self.evaluator is not None and not self.evaluator.is_valuable("wechat", evaluation_message):
+                        last_id = f"{chat_id}:{raw.get('local_id')}"
+                        last_time = when
+                        continue
                     if self.repo.persist_message(account_id, conversation_id, wxid, chat_id, raw):
                         processed += 1
                         self.last_collected_at = datetime.now(timezone.utc)
@@ -173,7 +179,7 @@ class Manager:
                 conversation_id = self.repo.upsert_conversation(account_id, session)
                 self.repo.save_checkpoint(account_id, conversation_id, seq)
             binding = {"account_id": account_id, "wxid": request.wxid, "db_dir": str(Path(request.db_dir).resolve()), "bound_at": bound_at}
-            self.worker = WeChatWorker(self.repo, db, binding, float(os.getenv("WECHAT_POLL_INTERVAL", "5")))
+            self.worker = WeChatWorker(self.repo, db, binding, float(os.getenv("WECHAT_POLL_INTERVAL", "5")), MessageValueClient())
             self.worker.start()
             return self.status()
 
@@ -182,7 +188,7 @@ class Manager:
         if not binding: return
         try:
             db, _ = self.open_db(binding["db_dir"], binding["wxid"])
-            self.worker = WeChatWorker(self.repo, db, binding, float(os.getenv("WECHAT_POLL_INTERVAL", "5")))
+            self.worker = WeChatWorker(self.repo, db, binding, float(os.getenv("WECHAT_POLL_INTERVAL", "5")), MessageValueClient())
             self.worker.start()
         except Exception as exc:
             self.repo.heartbeat("error", failed=1, error=str(exc))
