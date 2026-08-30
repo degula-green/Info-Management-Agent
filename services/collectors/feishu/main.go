@@ -232,6 +232,7 @@ func main() {
 	stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	heartbeat(context.Background(), pool, "feishu-collector", "running", 0, 0, nil)
+	valueEvaluator := newMessageValueClient()
 	seenPath := filepath.Join(*root, "seen-feishu.json")
 	seen := map[string]bool{}
 	if b, err := os.ReadFile(seenPath); err == nil {
@@ -273,7 +274,30 @@ func main() {
 					if seen[key] {
 						continue
 					}
-					if err := appendEvent(*root, *account, event{"feishu", *account, mid, time.Now().UTC().Format(time.RFC3339), raw}); err != nil {
+					evaluationRaw := make(map[string]any, len(raw)+4)
+					for field, value := range raw {
+						evaluationRaw[field] = value
+					}
+					evaluationRaw["chat_id"] = id
+					for _, field := range []string{"chat_type", "chat_mode", "name", "chat_name"} {
+						if value, exists := chat[field]; exists {
+							evaluationRaw[field] = value
+						}
+					}
+					evaluationCtx, evaluationCancel := context.WithTimeout(stopCtx, 15*time.Second)
+					valuable := valueEvaluator.isValuable(evaluationCtx, "feishu", evaluationRaw)
+					evaluationCancel()
+					if !valuable {
+						seen[key] = true
+						when, _ := occurredAt(raw)
+						checkpointCtx, checkpointCancel := context.WithTimeout(context.Background(), 10*time.Second)
+						if err := saveCheckpoint(checkpointCtx, pool, *account, id, messages.Data.PageToken, mid, when); err != nil {
+							fmt.Fprintln(os.Stderr, "checkpoint filtered message:", err)
+						}
+						checkpointCancel()
+						continue
+					}
+					if err := appendEvent(*root, *account, event{"feishu", *account, mid, time.Now().UTC().Format(time.RFC3339), evaluationRaw}); err != nil {
 						fmt.Fprintln(os.Stderr, err)
 						continue
 					}

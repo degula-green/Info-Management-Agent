@@ -20,6 +20,14 @@ class Settings:
     worker_enabled: bool = os.getenv("RAG_WORKER_ENABLED", "true").lower() == "true"
     worker_poll_interval: float = float(os.getenv("RAG_WORKER_POLL_INTERVAL", "5"))
     worker_batch_size: int = int(os.getenv("RAG_WORKER_BATCH_SIZE", "10"))
+    message_value_enabled: bool = os.getenv("MESSAGE_VALUE_ENABLED", "true").lower() == "true"
+    message_value_api_base_url: str = os.getenv(
+        "MESSAGE_VALUE_API_BASE_URL",
+        os.getenv("EMBEDDING_API_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+    )
+    message_value_api_key: str = os.getenv("MESSAGE_VALUE_API_KEY", os.getenv("EMBEDDING_API_KEY", ""))
+    message_value_model: str = os.getenv("MESSAGE_VALUE_MODEL", "qwen-plus")
+    message_value_timeout_seconds: float = float(os.getenv("MESSAGE_VALUE_TIMEOUT_SECONDS", "10"))
 
 
 settings = Settings()

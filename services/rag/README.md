@@ -27,3 +27,15 @@ RAG 服务也提供 `POST /ingest`，请求体为 `{ "messages": [...] }`，便�
 Core/outbox 调用。需要配置 `EMBEDDING_API_BASE_URL`、`EMBEDDING_API_KEY` 和
 PostgreSQL、Embedding API 和 Elasticsearch 连接信息。Elasticsearch 在本阶段保留，
 不参与向量写入。
+
+## 消息价值判断
+
+采集器在写入消息表前调用 `POST /evaluate/message`。该接口使用 OpenAI 兼容的
+Chat Completions API，默认模型为 `qwen-plus`，请求体为：
+
+```json
+{"source":"feishu","message":{"chat_id":"oc_xxx","msg_type":"text","body":{"content":"..."}}}
+```
+
+返回 `valuable=false` 时采集器过滤消息；只有明确的布尔 `false` 才会过滤。接口未配置、超时、返回格式错误或模型服务不可用时默认放行，保证原有采集链路不中断。配置
+`MESSAGE_VALUE_API_KEY`；未设置时可复用 `EMBEDDING_API_KEY`。

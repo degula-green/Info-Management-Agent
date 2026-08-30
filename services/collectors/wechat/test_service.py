@@ -29,6 +29,11 @@ class FakeRepo:
     def heartbeat(self, *args, **kwargs): pass
 
 
+class FakeEvaluator:
+    def __init__(self, valuable): self.valuable = valuable
+    def is_valuable(self, source, message): return self.valuable
+
+
 class WorkerTests(unittest.TestCase):
     def test_existing_conversation_only_reads_after_checkpoint(self):
         bound = datetime.now(timezone.utc) - timedelta(minutes=1)
@@ -46,6 +51,15 @@ class WorkerTests(unittest.TestCase):
         repo = FakeRepo({}); db = FakeDB([{"id": 2, "username": "new-chat"}], recent={"new-chat": list(reversed(rows))})
         worker = WeChatWorker(repo, db, {"account_id": 1, "wxid": "wxid_a", "bound_at": bound})
         self.assertEqual(worker.poll(), (1, 0)); self.assertEqual(repo.persisted, [2]); self.assertEqual(repo.saved[-1], (2, 2))
+
+    def test_low_value_group_message_is_not_persisted(self):
+        bound = datetime.now(timezone.utc) - timedelta(minutes=1)
+        rows = [{"local_id": 3, "sort_seq": 12, "create_time": int(datetime.now(timezone.utc).timestamp()), "type": "text", "content": "好的"}]
+        repo = FakeRepo({1: 10}); db = FakeDB([{"id": 1, "username": "room@chatroom"}], new={"room@chatroom": rows})
+        worker = WeChatWorker(repo, db, {"account_id": 1, "wxid": "wxid_a", "bound_at": bound}, evaluator=FakeEvaluator(False))
+        self.assertEqual(worker.poll(), (0, 0))
+        self.assertEqual(repo.persisted, [])
+        self.assertEqual(repo.saved[-1], (1, 12))
 
 
 if __name__ == "__main__": unittest.main()
