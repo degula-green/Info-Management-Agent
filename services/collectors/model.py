@@ -6,6 +6,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+from .attachments import extract_attachments
 
 
 def _text(value: Any) -> str:
@@ -44,6 +45,19 @@ def _wechat_text(raw: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     return content, {}
 
 
+def canonical_message_type(source: str, raw_type: Any) -> str:
+    value = _text(raw_type).strip().lower()
+    aliases = {
+        "text": "text", "文本": "text", "文字": "text",
+        "file": "file", "文件": "file", "media": "file", "49": "file",
+        "image": "image", "图片": "image", "audio": "audio", "语音": "audio",
+        "video": "video", "视频": "video", "link": "link", "链接": "link",
+        "system": "system", "系统消息": "system", "post": "mixed", "mixed": "mixed",
+        "interactive": "mixed", "share_chat": "mixed",
+    }
+    return aliases.get(value, "unknown")
+
+
 @dataclass
 class CanonicalMessage:
     id: str
@@ -57,6 +71,7 @@ class CanonicalMessage:
     occurred_at: str | None
     occurred_at_raw: Any
     message_type: str
+    source_message_type: str
     text: str
     attachments: list[dict[str, Any]] = field(default_factory=list)
     links: list[dict[str, Any]] = field(default_factory=list)
@@ -83,20 +98,24 @@ class CollectionEvent:
 
 def normalize_event(event: CollectionEvent) -> CanonicalMessage:
     raw = event.raw_payload
+    # Keep the canonical field and compatibility metadata copy in sync.
+    attachments = extract_attachments(raw)
     if event.source == "feishu":
         sender = raw.get("sender") or {}
-        text = _feishu_text(raw) if raw.get("msg_type") == "text" else ""
+        source_message_type = _text(raw.get("msg_type") or "unknown")
+        message_type = canonical_message_type(event.source, source_message_type)
+        text = _feishu_text(raw) if message_type == "text" else ""
         sender_id = sender.get("id")
         conversation_id = _text(raw.get("chat_id"))
-        message_type = _text(raw.get("msg_type") or "unknown")
         metadata = {"message_position": raw.get("message_position"), "tenant_key": sender.get("tenant_key")}
         occurred_raw = raw.get("create_time")
         deleted, updated = bool(raw.get("deleted")), bool(raw.get("updated"))
     else:
+        source_message_type = _text(raw.get("message_type") or raw.get("type") or "unknown")
+        message_type = canonical_message_type(event.source, source_message_type)
         text, metadata = _wechat_text(raw)
         sender_id = raw.get("sender_id")
         conversation_id = _text(raw.get("chat_id"))
-        message_type = _text(raw.get("message_type") or "unknown")
         occurred_raw = raw.get("create_time")
         deleted, updated = bool(raw.get("deleted")), bool(raw.get("updated"))
     source_id = _text(event.source_message_id)
@@ -107,6 +126,6 @@ def normalize_event(event: CollectionEvent) -> CanonicalMessage:
         conversation_type="group" if conversation_id.lower().endswith(("@chatroom", "@chatroom")) or conversation_id.startswith(("oc_", "@@")) else "direct",
         sender_id=_text(sender_id) or None, sender_name=raw.get("sender_name"),
         occurred_at=_iso_timestamp(occurred_raw, event.source), occurred_at_raw=occurred_raw,
-        message_type=message_type, text=text, is_deleted=deleted, is_updated=updated,
-        metadata={k: v for k, v in metadata.items() if v is not None},
+        message_type=message_type, source_message_type=source_message_type, text=text, attachments=attachments, is_deleted=deleted, is_updated=updated,
+        metadata={**{k: v for k, v in metadata.items() if v is not None}, "attachments": attachments},
     )

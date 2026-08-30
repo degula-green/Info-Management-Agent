@@ -35,7 +35,7 @@ func newMessageValueClient() *messageValueClient {
 }
 
 func (c *messageValueClient) isValuable(ctx context.Context, source string, raw map[string]any) bool {
-	if c == nil || c.endpoint == "" || !isGroupMessage(source, raw) {
+	if c == nil || c.endpoint == "" {
 		return true
 	}
 	payload, err := json.Marshal(map[string]any{"source": source, "message": raw})
@@ -65,26 +65,4 @@ func (c *messageValueClient) isValuable(ctx context.Context, source string, raw 
 		return true
 	}
 	return *result.Valuable
-}
-
-func isGroupMessage(source string, raw map[string]any) bool {
-	chatID := fmt.Sprint(raw["chat_id"])
-	switch strings.ToLower(source) {
-	case "wechat":
-		return strings.HasSuffix(strings.ToLower(chatID), "@chatroom")
-	case "feishu":
-		// Feishu p2p chats may also use an oc_ ID. Prefer the explicit type
-		// returned by /im/v1/chats, and only use the prefix as a legacy fallback.
-		for _, key := range []string{"chat_type", "chat_mode", "conversation_type"} {
-			switch strings.ToLower(strings.TrimSpace(fmt.Sprint(raw[key]))) {
-			case "p2p", "direct", "private", "single":
-				return false
-			case "group", "group_chat":
-				return true
-			}
-		}
-		return strings.HasPrefix(strings.ToLower(chatID), "oc_")
-	default:
-		return false
-	}
 }

@@ -12,13 +12,18 @@ type Config struct {
 	MinioAccessKey     string
 	MinioSecretKey     string
 	MinioBucket        string
+	MinioSecure        bool
+	AvatarURLTTL       string
 	OpenFGAURL         string
 	OpenFGAStoreID     string
 	OpenFGAModelID     string
 	FeishuAppID        string
 	FeishuAppSecret    string
 	FeishuRedirectURI  string
+	WebBaseURL         string
+	JWTSecret          string
 	WechatCollectorURL string
+	CollectorToken     string
 }
 
 func Load() Config {
@@ -32,13 +37,18 @@ func Load() Config {
 		MinioAccessKey:     env("CORE_MINIO_ACCESS_KEY", ""),
 		MinioSecretKey:     env("CORE_MINIO_SECRET_KEY", ""),
 		MinioBucket:        env("CORE_MINIO_BUCKET", "info-agent"),
+		MinioSecure:        env("CORE_MINIO_SECURE", "false") == "true",
+		AvatarURLTTL:       env("CORE_AVATAR_URL_TTL", "15m"),
 		OpenFGAURL:         env("CORE_OPENFGA_URL", "http://127.0.0.1:8081"),
 		OpenFGAStoreID:     env("CORE_OPENFGA_STORE_ID", ""),
 		OpenFGAModelID:     env("CORE_OPENFGA_MODEL_ID", ""),
 		FeishuAppID:        env("FEISHU_APP_ID", ""),
 		FeishuAppSecret:    env("FEISHU_APP_SECRET", ""),
-		FeishuRedirectURI:  env("FEISHU_REDIRECT_URI", "http://localhost:8080/api/ingestion/feishu/callback"),
+		FeishuRedirectURI:  env("FEISHU_REDIRECT_URI", "http://localhost:8080/api/connectors/feishu/callback"),
+		WebBaseURL:         env("CORE_WEB_BASE_URL", "http://localhost:5174"),
+		JWTSecret:          env("CORE_JWT_SECRET", "change-me-in-production"),
 		WechatCollectorURL: env("WECHAT_COLLECTOR_URL", "http://127.0.0.1:8100"),
+		CollectorToken:     env("COLLECTOR_INTERNAL_TOKEN", "local-development-only"),
 	}
 }
 

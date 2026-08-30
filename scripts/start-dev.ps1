@@ -114,15 +114,21 @@ Import-EnvFile (Join-Path $corePath '.env')
 Import-EnvFile (Join-Path $ragPath '.env')
 if (-not $env:COLLECTOR_DATABASE_URL -and $env:CORE_DATABASE_URL) { $env:COLLECTOR_DATABASE_URL = $env:CORE_DATABASE_URL }
 
-Start-ServiceWindow 'info-agent core :8080' $corePath "& '$go' run ./cmd/server"
+Start-ServiceWindow 'info-agent core :8082 (8080 occupied)' $corePath "`$env:CORE_HTTP_PORT = '8082'; & '$go' run ./cmd/server"
 Start-ServiceWindow 'info-agent rag :8000' $ragPath "`$env:PYTHONPATH = '$ragRuntime'; & '$python' -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
-Start-ServiceWindow 'info-agent wechat collector :8100' $projectRoot "`$env:PYTHONPATH = '$ragRuntime;$projectRoot'; & '$python' -m uvicorn services.collectors.wechat.service:app --host 127.0.0.1 --port 8100"
-if ($env:FEISHU_SOURCE_ACCOUNT_ID -and $env:COLLECTOR_DATABASE_URL) {
-    Start-ServiceWindow 'info-agent feishu collector' $feishuPath "& '$go' run . --watch"
+if ($env:RAG_DATABASE_URL) {
+    Start-ServiceWindow 'info-agent attachment parse worker' $ragPath "`$env:PYTHONPATH = '$ragRuntime'; & '$python' -m app.attachment_parse_main"
 } else {
-    Write-Warning 'FEISHU_SOURCE_ACCOUNT_ID or COLLECTOR_DATABASE_URL is missing; Feishu collector was skipped.'
+    Write-Warning 'RAG_DATABASE_URL is missing; attachment parse worker was skipped.'
 }
-Start-ServiceWindow 'info-agent web :5173' $webPath "& '$npm' run dev -- --host 0.0.0.0"
+Start-ServiceWindow 'info-agent wechat collector :8100' $projectRoot "`$env:PYTHONPATH = '$ragRuntime;$projectRoot'; & '$python' -m uvicorn services.collectors.wechat.service:app --host 127.0.0.1 --port 8100"
+if ($env:COLLECTOR_DATABASE_URL) {
+    Start-ServiceWindow 'info-agent feishu collector' $feishuPath "& '$go' run . --watch"
+    Start-ServiceWindow 'info-agent feishu attachment worker' $feishuPath "& '$go' run . -mode=attachment-worker"
+} else {
+    Write-Warning 'COLLECTOR_DATABASE_URL is missing; Feishu collector was skipped.'
+}
+Start-ServiceWindow 'info-agent web :5174' $webPath "& '$npm' run dev -- --host 0.0.0.0"
 
 if ($nginx) {
     New-Item -ItemType Directory -Force -Path (Join-Path $nginxRuntime 'conf.d') | Out-Null
@@ -135,9 +141,10 @@ if ($nginx) {
 } else {
     Write-Warning 'nginx not found. Core, RAG and Web were started; gateway was skipped.'
     Write-Host 'Install nginx and add it to PATH, then run this file again.'
+    Write-Host 'Web profile URL (without gateway): http://localhost:5174/profile'
 }
 
 Write-Host 'Core: http://localhost:8080/health'
 Write-Host 'RAG:  http://localhost:8000/health'
-Write-Host 'Web:  http://localhost:5173'
+Write-Host 'Web:  http://localhost:5174'
 Read-Host 'Press Enter to close this launcher'

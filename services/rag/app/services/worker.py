@@ -3,10 +3,12 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 
 from app.config import settings
 from app.services.pgvector_store import PgVectorStore
-from app.services.vectorization import EmbeddingClient, message_chunks
+from app.services.vectorization import EmbeddingClient, document_chunks, message_chunks
+from app.services.index_service import delete_document_chunks, delete_message_chunks, index_chunks
 
 
 class VectorizationWorker:
@@ -43,30 +45,72 @@ class VectorizationWorker:
             conn.execute("""UPDATE ingestion.worker_tasks SET status='pending', locked_by=NULL,
                 locked_until=NULL, updated_at=now() WHERE task_type='vectorization'
                 AND status='processing' AND locked_until IS NOT NULL AND locked_until < now()""")
-            rows = conn.execute("""SELECT id, entity_id FROM ingestion.worker_tasks
+            rows = conn.execute("""SELECT id, entity_id, payload FROM ingestion.worker_tasks
                 WHERE task_type='vectorization' AND status='pending' AND next_run_at<=now()
-                ORDER BY id LIMIT %s FOR UPDATE SKIP LOCKED""", (settings.worker_batch_size,)).fetchall()
+                  AND COALESCE(payload->>'attachment_task','false') <> 'true'
+                  AND created_at >= COALESCE(NULLIF(%s, '')::timestamptz, now())
+                ORDER BY id LIMIT %s FOR UPDATE SKIP LOCKED""", (settings.rag_es_cutover_at, settings.worker_batch_size)).fetchall()
             ids = [int(row[0]) for row in rows]
-            for task_id, _ in rows:
+            for task_id, _, _ in rows:
                 conn.execute("UPDATE ingestion.worker_tasks SET status='processing', attempts=attempts+1, locked_by=%s, locked_until=now()+interval '10 minutes', updated_at=now() WHERE id=%s", (self.worker_id, task_id))
-        for task_id, entity_id in rows:
+        for task_id, entity_id, payload in rows:
+            document_id = None
             try:
+                if (payload or {}).get("kind") == "attachment":
+                    self._process_attachment(int(task_id), int((payload or {})["document_id"]))
+                    continue
                 message = self.store.get_message(str(entity_id))
                 if message is None:
                     raise RuntimeError("message not found or already processed")
-                resolved = self.store.resolve_source(message)
-                if not resolved: raise RuntimeError("source account or raw message not found")
-                account_id, raw_id = resolved
                 text = " ".join(str(message.get("text") or "").split())
-                document_id = self.store.upsert_document(message, account_id, raw_id, "processing", text)
+                account_id = message.get("source_account_id")
+                raw_id = message.get("raw_message_id")
+                if account_id is None or raw_id is None:
+                    raise RuntimeError("message is missing internal source account or raw message id")
+                document_id = self.store.upsert_document(message, int(account_id), int(raw_id), "processing", text)
                 if not text: self.store.mark_skipped(document_id)
                 else:
                     chunks = message_chunks({**message, "text": text})
-                    self.store.replace_chunks(document_id, str(message.get("id", "")), chunks, self.embedder.embed([c["content"] for c in chunks]))
+                    vectors = self.embedder.embed([c["content"] for c in chunks])
+                    self.store.replace_chunks(document_id, str(message.get("id", "")), chunks, vectors)
+                    delete_message_chunks(str(message.get("id", "")))
+                    index_chunks([{**chunk, "document_id": document_id,
+                                   "raw_message_id": message.get("raw_message_id"),
+                                   "embedding_model": settings.embedding_model,
+                                   "embedding_version": settings.processor_version,
+                                   "is_deleted": bool(message.get("is_deleted")),
+                                   "indexed_at": datetime.now(timezone.utc),
+                                   "embedding": vector}
+                                  for chunk, vector in zip(chunks, vectors)])
+                    self.store.mark_completed(document_id)
                 self._finish(int(task_id), "completed", None)
             except Exception as exc:
+                if document_id is not None:
+                    self.store.mark_failed(document_id, str(exc))
                 self._fail(int(task_id), str(exc))
         return bool(ids)
+
+    def _process_attachment(self, task_id: int, document_id: int) -> None:
+        document = self.store.get_attachment_document(document_id)
+        if document is None:
+            raise RuntimeError("attachment document not found")
+        text = "\n".join(str(document.get("content") or "").splitlines()).strip()
+        try:
+            chunks = document_chunks({**document, "content": text})
+            if not chunks:
+                raise RuntimeError("attachment document produced no chunks")
+            vectors = self.embedder.embed([c["content"] for c in chunks])
+            self.store.replace_chunks(document_id, str(document["message_id"]), chunks, vectors)
+            delete_document_chunks(document_id)
+            index_chunks([{**chunk, "raw_message_id": document.get("raw_message_id"),
+                           "embedding_model": settings.embedding_model, "embedding_version": settings.processor_version,
+                           "is_deleted": bool(document.get("is_deleted")), "indexed_at": datetime.now(timezone.utc),
+                           "embedding": vector} for chunk, vector in zip(chunks, vectors)])
+            self.store.mark_completed(document_id)
+            self._finish(task_id, "completed", None)
+        except Exception as exc:
+            self.store.mark_failed(document_id, str(exc))
+            self._fail(task_id, str(exc))
 
     def _heartbeat(self, status: str) -> None:
         try:

@@ -39,7 +39,7 @@ def message_chunks(message: dict[str, Any]) -> list[dict[str, Any]]:
     message_id = str(message.get("id") or message.get("source_message_id") or "")
     result = []
     for position, content in enumerate(chunks):
-        chunk_id = hashlib.sha256(f"{message_id}:{position}:{content}".encode()).hexdigest()[:32]
+        chunk_id = hashlib.sha256(f"{message_id}:{settings.processor_version}:{position}".encode()).hexdigest()[:32]
         result.append({
             "chunk_id": chunk_id,
             "message_id": message_id,
@@ -47,12 +47,57 @@ def message_chunks(message: dict[str, Any]) -> list[dict[str, Any]]:
             "chunk_position": position,
             "source": message.get("source"),
             "source_account_id": message.get("source_account_id"),
+            "external_account_id": message.get("external_account_id"),
             "source_message_id": message.get("source_message_id"),
             "conversation_id": message.get("conversation_id"),
+            "external_conversation_id": message.get("external_conversation_id"),
             "sender_id": message.get("sender_id"),
+            "external_sender_id": message.get("external_sender_id"),
+            "user_id": message.get("user_id"),
             "occurred_at": message.get("occurred_at"),
             "message_type": message.get("message_type"),
             "metadata": message.get("metadata") or {},
+        })
+    return result
+
+
+def document_chunks(document: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep Markdown sections intact where possible before applying size limits."""
+    text = str(document.get("content") or "")
+    sections: list[tuple[str, str]] = []
+    title, lines = "", []
+    for line in text.splitlines():
+        if line.startswith("#"):
+            if lines:
+                sections.append((title, "\n".join(lines)))
+            title, lines = line.lstrip("# ").strip(), [line]
+        else:
+            lines.append(line)
+    if lines:
+        sections.append((title, "\n".join(lines)))
+    parts: list[tuple[str, str]] = []
+    for heading, section in sections:
+        for part in chunk_text(section):
+            parts.append((heading, part))
+    document_id = str(document["document_id"])
+    result = []
+    for position, (heading, content) in enumerate(parts):
+        chunk_id = hashlib.sha256(f"{document_id}:{settings.processor_version}:{position}".encode()).hexdigest()[:32]
+        result.append({
+            "chunk_id": chunk_id, "document_id": int(document["document_id"]),
+            "message_id": str(document["message_id"]), "content": content,
+            "chunk_position": position, "source": document["source"],
+            "source_account_id": document["source_account_id"],
+            "external_account_id": document.get("external_account_id"),
+            "source_message_id": document.get("source_message_id"),
+            "conversation_id": document.get("conversation_id"),
+            "external_conversation_id": document.get("external_conversation_id"),
+            "sender_id": document.get("sender_id"),
+            "external_sender_id": document.get("external_sender_id"),
+            "user_id": document["user_id"], "occurred_at": document.get("occurred_at"),
+            "message_type": "document", "file_id": str(document["attachment_id"]),
+            "source_type": "attachment", "source_position": heading or str(position),
+            "metadata": {**(document.get("metadata") or {}), "heading_path": [heading] if heading else []},
         })
     return result
 

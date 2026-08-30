@@ -119,6 +119,105 @@ func getWithRefresh(ctx context.Context, token *string, stored *credential, path
 	return get(*token, path, query, out)
 }
 
+func feishuProfileKey(sender map[string]any) string {
+	id, _ := sender["id"].(string)
+	idType, _ := sender["id_type"].(string)
+	return strings.TrimSpace(idType) + ":" + strings.TrimSpace(id)
+}
+
+func isFeishuUserIDType(value string) bool {
+	return value == "open_id" || value == "user_id" || value == "union_id"
+}
+
+func enrichFeishuSender(ctx context.Context, token *string, stored *credential, raw map[string]any, cache map[string]map[string]any, appID, appSecret, redisURL, redisDB, credentialKey string) {
+	sender, ok := raw["sender"].(map[string]any)
+	if !ok || strings.TrimSpace(feishuProfileKey(sender)) == ":" {
+		return
+	}
+	key := feishuProfileKey(sender)
+	idType, _ := sender["id_type"].(string)
+	if !isFeishuUserIDType(idType) {
+		// App and bot identities are not contact records and cannot be resolved
+		// through the Contact user API.
+		cache[key] = nil
+		return
+	}
+	profile, known := cache[key]
+	if !known {
+		id, _ := sender["id"].(string)
+		query := url.Values{}
+		query.Set("user_id_type", idType)
+		var response struct {
+			Data struct {
+				User map[string]any `json:"user"`
+			} `json:"data"`
+		}
+		if err := getWithRefresh(ctx, token, stored, "/contact/v3/users/"+url.PathEscape(id), query, &response, appID, appSecret, redisURL, redisDB, credentialKey); err != nil {
+			// An unavailable cross-tenant profile must not stop message ingestion.
+			// Keep the platform ID private while preserving the API diagnostic.
+			fmt.Fprintf(os.Stderr, "feishu participant profile lookup failed for %s: %v\n", idType, err)
+			cache[key] = nil
+			return
+		}
+		profile = response.Data.User
+		cache[key] = profile
+	}
+	if profile == nil {
+		return
+	}
+	if name, ok := profile["name"].(string); ok && strings.TrimSpace(name) != "" {
+		sender["name"] = strings.TrimSpace(name)
+	}
+	if avatar, ok := profile["avatar"]; ok {
+		sender["avatar"] = avatar
+	}
+}
+
+func refreshFeishuParticipantProfiles(ctx context.Context, pool *pgxpool.Pool, account string, token *string, stored *credential, cache map[string]map[string]any, appID, appSecret, redisURL, redisDB, credentialKey string) {
+	rows, err := pool.Query(ctx, `SELECT p.external_participant_id,p.id_type FROM ingestion.participants p
+        JOIN ingestion.source_accounts sa ON sa.id=p.source_account_id
+        WHERE sa.platform='feishu' AND sa.external_account_id=$1
+          AND (COALESCE(btrim(p.display_name),'')='' OR COALESCE(btrim(p.avatar_url),'')='')`, externalAccountID(account))
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, idType string
+		if rows.Scan(&id, &idType) != nil || id == "" {
+			continue
+		}
+		raw := map[string]any{"sender": map[string]any{"id": id, "id_type": idType}}
+		enrichFeishuSender(ctx, token, stored, raw, cache, appID, appSecret, redisURL, redisDB, credentialKey)
+		sender := raw["sender"].(map[string]any)
+		_ = updateFeishuParticipantProfile(ctx, pool, account, id, participantDisplayName(sender["name"]), participantAvatarURL(sender["avatar"]))
+	}
+}
+
+// Reload credentials every polling round so OAuth refreshes made by Core (or
+// another collector instance) take effect without restarting this process.
+func reloadCredential(ctx context.Context, token *string, stored *credential, account, redisURL, redisDB, appID, appSecret string) {
+	if redisURL == "" {
+		return
+	}
+	key := "credential:feishu:" + account
+	b, err := redisGet(ctx, redisURL, redisDB, key)
+	if err != nil {
+		return
+	}
+	var latest credential
+	if json.Unmarshal(b, &latest) != nil || latest.AccessToken == "" {
+		return
+	}
+	*stored = latest
+	*token = latest.AccessToken
+	if latest.ExpiresAt > 0 && latest.ExpiresAt < time.Now().Add(5*time.Minute).Unix() && latest.RefreshToken != "" && appID != "" && appSecret != "" {
+		if fresh, e := refreshAccessToken(ctx, appID, appSecret, latest.RefreshToken, redisURL, redisDB, key); e == nil {
+			*stored, *token = fresh, fresh.AccessToken
+		}
+	}
+}
+
 func appendEvent(root, account string, ev event) error {
 	day := time.Now().UTC().Format("2006-01-02")
 	path := filepath.Join(root, "raw", "feishu", account, day+".jsonl")
@@ -145,13 +244,16 @@ func main() {
 		pageDefault = 50
 	}
 	token := flag.String("token", os.Getenv("FEISHU_ACCESS_TOKEN"), "user access token")
-	account := flag.String("account", os.Getenv("FEISHU_SOURCE_ACCOUNT_ID"), "source account id")
+	// Account identity is resolved from the active logged-in connector below.
+	// Keep --account only as an explicit diagnostic/compatibility override.
+	account := flag.String("account", "", "source account id override")
 	root := flag.String("data-dir", "data/collector", "local collector data directory")
 	watch := flag.Bool("watch", false, "poll continuously")
 	once := flag.Bool("once", false, "poll once and exit")
 	interval := flag.Int("interval", intervalDefault, "poll interval in seconds")
 	pageSize := flag.Int("page-size", pageDefault, "page size")
 	workerEnabled := flag.Bool("worker-enabled", os.Getenv("FEISHU_WORKER_ENABLED") != "false", "run collector worker")
+	mode := flag.String("mode", "collector", "collector or attachment-worker")
 	credentialFile := flag.String("credential-file", os.Getenv("FEISHU_CREDENTIAL_FILE"), "OAuth credential JSON file")
 	databaseURL := flag.String("database-url", os.Getenv("COLLECTOR_DATABASE_URL"), "PostgreSQL connection URL")
 	redisURL := flag.String("redis-url", os.Getenv("CORE_REDIS_URL"), "Redis connection URL")
@@ -183,33 +285,6 @@ func main() {
 			}
 		}
 	}
-	if *account == "" {
-		fmt.Fprintln(os.Stderr, "FEISHU_SOURCE_ACCOUNT_ID is required")
-		os.Exit(2)
-	}
-	*account = externalAccountID(*account)
-	if *redisURL != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if b, err := redisGet(ctx, *redisURL, *redisDB, "credential:feishu:"+*account); err == nil {
-			var redisCredential credential
-			if json.Unmarshal(b, &redisCredential) == nil {
-				stored = redisCredential
-				if *token == "" {
-					*token = stored.AccessToken
-				}
-				if stored.ExpiresAt > 0 && stored.ExpiresAt < time.Now().Add(5*time.Minute).Unix() && stored.RefreshToken != "" && *appID != "" && *appSecret != "" {
-					if fresh, e := refreshAccessToken(ctx, *appID, *appSecret, stored.RefreshToken, *redisURL, *redisDB, "credential:feishu:"+*account); e == nil {
-						*token = fresh.AccessToken
-					}
-				}
-			}
-		}
-		cancel()
-	}
-	if *token == "" {
-		fmt.Fprintln(os.Stderr, "FEISHU_ACCESS_TOKEN and FEISHU_SOURCE_ACCOUNT_ID are required")
-		os.Exit(2)
-	}
 	if *databaseURL == "" {
 		fmt.Fprintln(os.Stderr, "COLLECTOR_DATABASE_URL is required")
 		os.Exit(2)
@@ -231,27 +306,133 @@ func main() {
 	defer pool.Close()
 	stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	heartbeat(context.Background(), pool, "feishu-collector", "running", 0, 0, nil)
+	if *account == "" && ((*mode == "collector" && *watch) || *mode == "attachment-worker") {
+		superviseFeishuAccounts(stopCtx, pool, *mode, *root, *interval, *pageSize, *databaseURL, *redisURL, *redisDB, *appID, *appSecret)
+		return
+	}
+	// Resolve the account from active OAuth connections rather than relying on
+	// the legacy .env default. The newest active account with a Redis credential
+	// represents the currently connected/login account and works without a
+	// collector restart after a new OAuth binding.
+	var rows interface {
+		Next() bool
+		Scan(...any) error
+		Close()
+	}
+	if *account == "" {
+		rows, _ = pool.Query(context.Background(), `SELECT external_account_id FROM ingestion.source_accounts WHERE platform='feishu' AND status='active' ORDER BY updated_at DESC NULLS LAST, id DESC`)
+	}
+	if rows != nil {
+		for rows.Next() {
+			var candidate string
+			if rows.Scan(&candidate) != nil || candidate == "" {
+				continue
+			}
+			probeCtx, probeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			b, probeErr := redisGet(probeCtx, *redisURL, *redisDB, "credential:feishu:"+candidate)
+			probeCancel()
+			var candidateCredential credential
+			if probeErr == nil && json.Unmarshal(b, &candidateCredential) == nil && candidateCredential.AccessToken != "" {
+				*account = candidate
+				break
+			}
+		}
+		rows.Close()
+	}
+	if *account == "" {
+		fmt.Fprintln(os.Stderr, "no active Feishu connector with a Redis credential was found")
+		os.Exit(2)
+	}
+	*account = externalAccountID(*account)
+	if *mode == "attachment-worker" {
+		runFeishuAttachmentWorker(pool, *account, *redisURL, *redisDB, *appID, *appSecret)
+		return
+	}
+	refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	reloadCredential(refreshCtx, token, &stored, *account, *redisURL, *redisDB, *appID, *appSecret)
+	refreshCancel()
+	if *token == "" {
+		message := "no usable Feishu Redis credential was found for the active connector"
+		accountHeartbeat(context.Background(), pool, *account, "error", 0, 1, &message)
+		fmt.Fprintln(os.Stderr, "no usable Feishu Redis credential was found for the active connector")
+		os.Exit(2)
+	}
+	profiles := map[string]map[string]any{}
 	valueEvaluator := newMessageValueClient()
-	seenPath := filepath.Join(*root, "seen-feishu.json")
+	accountHeartbeat(context.Background(), pool, *account, "running", 0, 0, nil)
+	seenPath := filepath.Join(*root, "seen-feishu-"+*account+".json")
 	seen := map[string]bool{}
 	if b, err := os.ReadFile(seenPath); err == nil {
 		_ = json.Unmarshal(b, &seen)
 	}
 	for {
 		if stopCtx.Err() != nil {
-			heartbeat(context.Background(), pool, "feishu-collector", "stopped", 0, 0, nil)
+			accountHeartbeat(context.Background(), pool, *account, "stopped", 0, 0, nil)
 			return
 		}
+		roundCtx, roundCancel := context.WithTimeout(stopCtx, 5*time.Second)
+		reloadCredential(roundCtx, token, &stored, *account, *redisURL, *redisDB, *appID, *appSecret)
+		roundCancel()
+		refreshFeishuParticipantProfiles(stopCtx, pool, *account, token, &stored, profiles, *appID, *appSecret, *redisURL, *redisDB, "credential:feishu:"+*account)
 		var chats page
 		q := url.Values{"page_size": {strconv.Itoa(*pageSize)}}
 		if err := getWithRefresh(stopCtx, token, &stored, "/im/v1/chats", q, &chats, *appID, *appSecret, *redisURL, *redisDB, "credential:feishu:"+*account); err != nil {
+			message := err.Error()
+			accountHeartbeat(context.Background(), pool, *account, "error", 0, 1, &message)
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
+		}
+		listen, listenErr := loadListenConfig(stopCtx, pool, *account)
+		if listenErr != nil || len(listen.Selected) == 0 {
+			// Keep the selectable conversation directory fresh while the empty
+			// whitelist pauses message ingestion.
+			for _, chat := range chats.Data.Items {
+				id, _ := chat["chat_id"].(string)
+				name := chatDisplayName(chat)
+				if id != "" {
+					// Some Feishu tenants return only chat_id from the list
+					// endpoint. Resolve the detail resource so the UI can show the
+					// actual chat name and avatar.
+					if name == "" {
+						var detail struct {
+							Data map[string]any `json:"data"`
+						}
+						if err := getWithRefresh(stopCtx, token, &stored, "/im/v1/chats/"+url.PathEscape(id), nil, &detail, *appID, *appSecret, *redisURL, *redisDB, "credential:feishu:"+*account); err == nil && detail.Data != nil {
+							for k, v := range detail.Data {
+								chat[k] = v
+							}
+							name = chatDisplayName(chat)
+						}
+					}
+					_ = upsertConversationMetadata(stopCtx, pool, *account, id, name, chat)
+				}
+			}
+			accountHeartbeat(context.Background(), pool, *account, "running", 0, 0, nil)
+			if !*watch {
+				return
+			}
+			time.Sleep(time.Duration(*interval) * time.Second)
+			continue
 		}
 		for _, chat := range chats.Data.Items {
 			id, _ := chat["chat_id"].(string)
 			if id == "" {
+				continue
+			}
+			name := chatDisplayName(chat)
+			if name == "" {
+				var detail struct {
+					Data map[string]any `json:"data"`
+				}
+				if err := getWithRefresh(stopCtx, token, &stored, "/im/v1/chats/"+url.PathEscape(id), nil, &detail, *appID, *appSecret, *redisURL, *redisDB, "credential:feishu:"+*account); err == nil && detail.Data != nil {
+					for k, v := range detail.Data {
+						chat[k] = v
+					}
+					name = chatDisplayName(chat)
+				}
+			}
+			_ = upsertConversationMetadata(stopCtx, pool, *account, id, name, chat)
+			if !listen.Selected[id] {
 				continue
 			}
 			pageToken, _ := loadCheckpoint(stopCtx, pool, *account, id)
@@ -270,6 +451,15 @@ func main() {
 					if mid == "" {
 						continue
 					}
+					when, _ := occurredAt(raw)
+					startAt := listen.HistoryFrom
+					if startAt == nil {
+						startAt = listen.UpdatedAt
+					}
+					if startAt != nil && when != nil && when.Before(*startAt) {
+						continue
+					}
+					enrichFeishuSender(stopCtx, token, &stored, raw, profiles, *appID, *appSecret, *redisURL, *redisDB, "credential:feishu:"+*account)
 					key := *account + ":" + mid
 					if seen[key] {
 						continue
@@ -289,7 +479,6 @@ func main() {
 					evaluationCancel()
 					if !valuable {
 						seen[key] = true
-						when, _ := occurredAt(raw)
 						checkpointCtx, checkpointCancel := context.WithTimeout(context.Background(), 10*time.Second)
 						if err := saveCheckpoint(checkpointCtx, pool, *account, id, messages.Data.PageToken, mid, when); err != nil {
 							fmt.Fprintln(os.Stderr, "checkpoint filtered message:", err)
@@ -309,11 +498,17 @@ func main() {
 					}
 					persistCancel()
 					seen[key] = true
-					when, _ := occurredAt(raw)
 					checkpointCtx, checkpointCancel := context.WithTimeout(context.Background(), 10*time.Second)
 					if err := saveCheckpoint(checkpointCtx, pool, *account, id, messages.Data.PageToken, mid, when); err != nil {
 						fmt.Fprintln(os.Stderr, "checkpoint:", err)
 					}
+					checkpointCancel()
+				}
+				// Advance the page cursor even when all messages on this page are
+				// older than the configured history window.
+				if messages.Data.PageToken != "" {
+					checkpointCtx, checkpointCancel := context.WithTimeout(context.Background(), 10*time.Second)
+					_ = saveCheckpoint(checkpointCtx, pool, *account, id, messages.Data.PageToken, "", nil)
 					checkpointCancel()
 				}
 				if !messages.Data.HasMore || messages.Data.PageToken == "" {
@@ -327,11 +522,20 @@ func main() {
 		if !*watch {
 			return
 		}
-		heartbeat(context.Background(), pool, "feishu-collector", "running", 1, 0, nil)
+		accountHeartbeat(context.Background(), pool, *account, "running", 1, 0, nil)
 		select {
 		case <-stopCtx.Done():
 			return
 		case <-time.After(time.Duration(*interval) * time.Second):
 		}
 	}
+}
+
+func chatDisplayName(chat map[string]any) string {
+	for _, key := range []string{"name", "chat_name", "display_name", "nickname"} {
+		if value, ok := chat[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }

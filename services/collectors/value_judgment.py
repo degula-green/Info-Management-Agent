@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import urllib.error
 import urllib.request
 from typing import Any
 
@@ -29,7 +28,7 @@ class MessageValueClient:
             self.timeout = 10.0
 
     def is_valuable(self, source: str, message: dict[str, Any]) -> bool:
-        if not self.endpoint or not self._is_group_message(source, message):
+        if not self.endpoint:
             return True
         payload = json.dumps({"source": source, "message": message}, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
@@ -52,19 +51,3 @@ class MessageValueClient:
             # the optional semantic service is down or returns malformed data.
             logger.warning("message value evaluator unavailable; message will be stored (%s)", type(exc).__name__)
             return True
-
-    @staticmethod
-    def _is_group_message(source: str, message: dict[str, Any]) -> bool:
-        chat_id = str(message.get("chat_id") or "").lower()
-        source = str(source).lower()
-        if source == "wechat":
-            return chat_id.endswith("@chatroom")
-        if source == "feishu":
-            for key in ("chat_type", "chat_mode", "conversation_type"):
-                chat_type = str(message.get(key) or "").strip().lower()
-                if chat_type in {"p2p", "direct", "private", "single"}:
-                    return False
-                if chat_type in {"group", "group_chat"}:
-                    return True
-            return chat_id.startswith("oc_")
-        return False

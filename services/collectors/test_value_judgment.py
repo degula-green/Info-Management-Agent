@@ -13,17 +13,20 @@ class MessageValueClientTests(unittest.TestCase):
         with patch.dict(os.environ, {"MESSAGE_VALUE_TIMEOUT_SECONDS": "invalid"}):
             self.assertEqual(MessageValueClient(endpoint="").timeout, 10.0)
 
-    def test_direct_message_does_not_call_endpoint(self):
-        client = MessageValueClient(endpoint="http://unused", timeout=0.1)
-        with patch("services.collectors.value_judgment.urllib.request.urlopen") as urlopen:
-            self.assertTrue(client.is_valuable("feishu", {"chat_id": "ou_direct"}))
-            urlopen.assert_not_called()
+    def test_direct_message_uses_boolean_result(self):
+        client = MessageValueClient(endpoint="http://value", timeout=1)
 
-    def test_feishu_p2p_message_does_not_call_endpoint(self):
-        client = MessageValueClient(endpoint="http://unused", timeout=0.1)
+        class Response:
+            status = 200
+
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps({"valuable": False}).encode()
+
         with patch("services.collectors.value_judgment.urllib.request.urlopen") as urlopen:
-            self.assertTrue(client.is_valuable("feishu", {"chat_id": "oc_p2p", "chat_type": "p2p"}))
-            urlopen.assert_not_called()
+            urlopen.return_value = Response()
+            self.assertFalse(client.is_valuable("feishu", {"chat_id": "ou_direct"}))
+            urlopen.assert_called_once()
 
     def test_group_message_uses_boolean_result(self):
         client = MessageValueClient(endpoint="http://value", timeout=1)

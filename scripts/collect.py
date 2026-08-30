@@ -33,8 +33,7 @@ def collect_fixture(path: Path, source: str, account: str, store: LocalStore, ev
         source_id = str(raw.get("message_id") or raw.get("local_id") or raw.get("id") or "")
         if not source_id:
             continue
-        evaluation_source = str(raw.get("source") or source)
-        if evaluator is not None and not evaluator.is_valuable(evaluation_source, raw):
+        if evaluator is not None and not evaluator.is_valuable(str(raw.get("source") or source), raw):
             continue
         event = CollectionEvent(source, account, source_id, datetime.now(timezone.utc).isoformat(), raw)
         if store.save(event, normalize_event(event)):
@@ -44,7 +43,9 @@ def collect_fixture(path: Path, source: str, account: str, store: LocalStore, ev
 
 def run_wechat(args: argparse.Namespace, store: LocalStore, evaluator: MessageValueClient | None = None) -> int:
     from wechatauto import WeChatDB
+    from services.collectors.wechat.attachments import WeChatAttachmentParser
     db = WeChatDB(account=args.account or None, db_dir=args.db_dir or None)
+    attachment_parser = WeChatAttachmentParser(db)
     info = db.get_self_info() if hasattr(db, "get_self_info") else {}
     info = info if isinstance(info, dict) else getattr(info, "__dict__", {})
     account = account_id("wechat", args.account, info)
@@ -60,6 +61,8 @@ def run_wechat(args: argparse.Namespace, store: LocalStore, evaluator: MessageVa
             rows = db.get_messages(chat_id, limit=args.message_limit)
             for item in rows:
                 raw = item if isinstance(item, dict) else vars(item)
+                if attachment_parser.is_file_message(raw):
+                    raw = {**raw, "attachments": attachment_parser.parse(args.account or account, chat_id, raw)}
                 source_id = str(raw.get("message_id") or raw.get("local_id") or raw.get("id") or "")
                 if not source_id:
                     continue

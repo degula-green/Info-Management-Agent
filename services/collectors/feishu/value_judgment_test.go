@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestMessageValueClientSkipsDirectMessages(t *testing.T) {
+func TestMessageValueClientEvaluatesDirectMessages(t *testing.T) {
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -17,21 +17,11 @@ func TestMessageValueClientSkipsDirectMessages(t *testing.T) {
 	}))
 	defer server.Close()
 	client := &messageValueClient{endpoint: server.URL, client: server.Client()}
-	if !client.isValuable(context.Background(), "feishu", map[string]any{"chat_id": "ou_direct"}) {
-		t.Fatal("direct messages must be retained")
+	if client.isValuable(context.Background(), "feishu", map[string]any{"chat_id": "ou_direct"}) {
+		t.Fatal("direct messages must use the evaluator result")
 	}
-	if calls != 0 {
-		t.Fatalf("expected no evaluator call for direct message, got %d", calls)
-	}
-}
-
-func TestMessageValueClientSkipsFeishuP2PMessages(t *testing.T) {
-	client := &messageValueClient{endpoint: "http://127.0.0.1:1/evaluate/message", client: http.DefaultClient}
-	if !client.isValuable(context.Background(), "feishu", map[string]any{
-		"chat_id":   "oc_p2p",
-		"chat_type": "p2p",
-	}) {
-		t.Fatal("Feishu p2p messages must be retained without evaluator calls")
+	if calls != 1 {
+		t.Fatalf("expected one evaluator call for direct message, got %d", calls)
 	}
 }
 

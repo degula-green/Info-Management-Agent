@@ -4,20 +4,28 @@
     "number_of_replicas": 0
   },
   "mappings": {
+    "dynamic": "strict",
     "properties": {
       "content": { "type": "text" },
       "chunk_id": { "type": "keyword" },
       "message_id": { "type": "keyword" },
+      "document_id": { "type": "long" },
+      "raw_message_id": { "type": "long" },
+      "user_id": { "type": "long" },
       "source": { "type": "keyword" },
-      "source_account_id": { "type": "keyword" },
+      "source_account_id": { "type": "long" },
+      "external_account_id": { "type": "keyword" },
       "source_message_id": { "type": "keyword" },
-      "conversation_id": { "type": "keyword" },
-      "sender_id": { "type": "keyword" },
+      "conversation_id": { "type": "long" },
+      "external_conversation_id": { "type": "keyword" },
+      "sender_id": { "type": "long" },
+      "external_sender_id": { "type": "keyword" },
       "chunk_position": { "type": "integer" },
       "message_type": { "type": "keyword" },
       "metadata": { "type": "object", "enabled": false },
       "embedding": {
         "type": "dense_vector",
+        "dims": 1536,
         "index": true,
         "similarity": "cosine"
       },
@@ -26,7 +34,12 @@
       "organization_id": { "type": "keyword" },
       "source_type": { "type": "keyword" },
       "source_position": { "type": "keyword" },
-      "occurred_at": { "type": "date" }
+      "occurred_at": { "type": "date" },
+      "content_hash": { "type": "keyword" },
+      "embedding_model": { "type": "keyword" },
+      "embedding_version": { "type": "keyword" },
+      "is_deleted": { "type": "boolean" },
+      "indexed_at": { "type": "date" }
     }
   }
 }

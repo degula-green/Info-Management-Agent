@@ -2,3 +2,5 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 elasticsearch==8.17.0
 psycopg[binary]==3.2.3
+minio==7.2.15
+mineru[pipeline]==3.4.5
