@@ -1,12 +1,14 @@
 <template>
   <section class="profile-page">
     <div class="profile-hero">
-      <button class="profile-hero__avatar" type="button" aria-label="编辑头像" @click="openAvatarEditor">
-        <span>{{ form.avatar }}</span>
+      <button class="profile-hero__avatar" type="button" aria-label="编辑头像" @click="avatarInput?.click()">
+        <img v-if="profile.avatar_url" :src="profile.avatar_url" alt="" />
+        <span v-else>{{ avatarLabel }}</span>
         <span class="profile-hero__badge"><t-icon name="check-circle-filled" /></span>
       </button>
+      <input ref="avatarInput" class="avatar-file-input" type="file" accept="image/jpeg,image/png,image/webp" @change="onAvatarSelected" />
       <h1>{{ form.nickname || '未设置昵称' }}</h1>
-      <p>{{ form.email }}</p>
+      <p>{{ profile.email }}</p>
     </div>
 
     <div class="profile-layout">
@@ -25,7 +27,7 @@
           </div>
           <div class="profile-setting-row">
             <div class="profile-setting-row__label"><t-icon name="email" /><span>邮箱</span></div>
-            <span class="profile-setting-row__value">{{ form.email }}</span>
+            <span class="profile-setting-row__value">{{ profile.email }}</span>
           </div>
         </div>
       </section>
@@ -39,15 +41,15 @@
           </div>
         </div>
         <div class="connector-list">
-          <div v-for="source in store.sources" :key="source.key" class="connector-row">
-            <span class="connector-mark" :style="{ background: sourceColor[source.key] }">{{ source.name.slice(0, 1) }}</span>
+          <div v-for="connector in connectors" :key="connector.platform" class="connector-row">
+            <span class="connector-mark" :style="{ background: sourceColor[connector.platform] }">{{ connector.display_name.slice(0, 1) }}</span>
             <div class="connector-row__body">
-              <strong>{{ source.name }}</strong>
-              <small>{{ source.bound ? source.account : `未绑定，绑定后开放${source.kbName}` }}</small>
+              <strong>{{ connector.display_name }}</strong>
+              <small>{{ connectorSummary(connector) }}</small>
             </div>
-            <t-tag :theme="source.bound ? 'success' : 'default'" variant="light">{{ source.bound ? '已绑定' : '未绑定' }}</t-tag>
-            <t-button :theme="source.bound ? 'default' : 'primary'" :variant="source.bound ? 'outline' : 'base'" size="small" @click="toggleSource(source.key)">
-              {{ source.bound ? '解除绑定' : `绑定${source.name}` }}
+            <t-tag :theme="connector.bound ? 'success' : 'default'" variant="light">{{ connectorStatus(connector) }}</t-tag>
+            <t-button :theme="connector.bound ? 'default' : 'primary'" :variant="connector.bound ? 'outline' : 'base'" size="small" :disabled="connector.availability !== 'available'" @click="handleConnector(connector)">
+              {{ connector.bound ? '解除绑定' : connector.availability === 'available' ? `绑定${connector.display_name}` : '暂未开放' }}
             </t-button>
           </div>
         </div>
@@ -61,18 +63,11 @@
       </t-button>
     </div>
 
-    <t-dialog v-model:visible="avatarDialogVisible" header="编辑头像" :confirm-btn="'确定'" :cancel-btn="'取消'" @confirm="confirmAvatarEdit">
-      <div class="avatar-dialog">
-        <span class="avatar-dialog__preview">{{ avatarDraft || '?' }}</span>
-        <t-input v-model="avatarDraft" maxlength="2" placeholder="输入 1-2 个字" aria-label="头像文字" />
-      </div>
-    </t-dialog>
-
-    <t-dialog v-model:visible="authDialogVisible" :header="`绑定${pendingSource?.name || ''}`" :confirm-btn="'确认授权'" :cancel-btn="'取消'" @confirm="confirmBind">
+    <t-dialog v-model:visible="feishuDialogVisible" header="绑定飞书" :confirm-btn="'前往飞书授权'" :cancel-btn="'取消'" @confirm="confirmFeishuBind">
       <div class="auth-dialog">
-        <div class="auth-dialog__icon" :style="{ background: pendingSource ? sourceColor[pendingSource.key] : '' }">{{ pendingSource?.name.slice(0, 1) }}</div>
-        <h3>模拟授权{{ pendingSource?.name }}连接器</h3>
-        <p>授权后，Info Agent 将读取你有权限访问的群聊、私聊消息和文件，并在本地 Mock 数据中开放对应知识库。</p>
+        <div class="auth-dialog__icon" :style="{ background: sourceColor.feishu }">飞</div>
+        <h3>授权飞书连接器</h3>
+        <p>授权后，Info Agent 将读取你有权限访问的群聊、私聊消息和文件。</p>
         <div class="auth-dialog__scope">
           <span><t-icon name="check-circle-filled" />读取会话消息</span>
           <span><t-icon name="check-circle-filled" />读取文件和图片</span>
@@ -80,56 +75,90 @@
         </div>
       </div>
     </t-dialog>
+    <t-dialog v-model:visible="wechatDialogVisible" header="绑定个人微信" :confirm-btn="'确认绑定'" :cancel-btn="'取消'" @confirm="confirmWechatBind">
+      <t-form :data="wechatForm" label-align="top">
+        <t-form-item label="微信 ID"><t-input v-model="wechatForm.wxid" placeholder="例如 wxid_xxx" /></t-form-item>
+        <t-form-item label="本机微信数据目录"><t-input v-model="wechatForm.db_dir" placeholder="仅本机开发环境可用" /></t-form-item>
+      </t-form>
+    </t-dialog>
   </section>
 </template>
 
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
-import { sourceColor, type InfoSource, type SourceKey } from '@/mock'
+import { sourceColor } from '@/mock'
 import { useInfoMockStore } from '@/stores/infoMock'
+import { bindWechat, getConnectors, getFeishuAuthorizeURL, getProfile, type Connector, type Profile, unbindConnector, updateProfile, uploadAvatar } from '@/api/info-profile'
 
 const store = useInfoMockStore()
-const form = reactive({ nickname: store.profile.nickname, email: store.profile.email, avatar: store.profile.avatar })
-const avatarDraft = ref(form.avatar)
-const avatarDialogVisible = ref(false)
-const authDialogVisible = ref(false)
-const pendingSource = ref<InfoSource | null>(null)
+const profile = ref<Profile>({ id: 0, username: '', nickname: store.profile.nickname, email: store.profile.email, avatar_url: null, updated_at: '' })
+const form = reactive({ nickname: store.profile.nickname })
+const connectors = ref<Connector[]>([])
+const avatarInput = ref<HTMLInputElement | null>(null)
+const feishuDialogVisible = ref(false)
+const wechatDialogVisible = ref(false)
+const wechatRebind = ref(false)
+const wechatForm = reactive({ wxid: '', db_dir: '' })
+const avatarLabel = computed(() => (form.nickname.trim().slice(0, 1) || '我'))
 
-function saveProfile() {
-  store.updateProfile(form)
-  MessagePlugin.success('个人资料已保存')
+function errorMessage(cause: any, fallback: string) { return cause?.message || cause?.error?.message || fallback }
+function syncProfile(value: Profile) {
+  profile.value = value
+  form.nickname = value.nickname
+  store.updateProfile({ nickname: value.nickname, email: value.email, avatar: value.nickname.slice(0, 1) || '我' })
 }
-
-function openAvatarEditor() {
-  avatarDraft.value = form.avatar
-  avatarDialogVisible.value = true
+async function loadPage() {
+  try {
+    const [nextProfile, nextConnectors] = await Promise.all([getProfile(), getConnectors()])
+    syncProfile(nextProfile)
+    connectors.value = nextConnectors
+  } catch (cause) { MessagePlugin.error(errorMessage(cause, '个人中心加载失败，请重新登录后再试')) }
 }
-
-function confirmAvatarEdit() {
-  form.avatar = avatarDraft.value.trim() || form.nickname.slice(0, 1) || '林'
-  avatarDialogVisible.value = false
+async function saveProfile() {
+  try { syncProfile(await updateProfile(form.nickname)); MessagePlugin.success('个人资料已保存') }
+  catch (cause) { MessagePlugin.error(errorMessage(cause, '保存失败')) }
 }
-
-function toggleSource(key: SourceKey) {
-  const source = store.findSource(key)
-  if (!source) return
-  if (source.bound) {
-    store.unbindSource(key)
-    MessagePlugin.success(`已解除${source.name}绑定`)
-  } else {
-    pendingSource.value = source
-    authDialogVisible.value = true
+async function onAvatarSelected(event: Event) {
+  const file = (event.target as HTMLInputElement).files?.[0]
+  if (!file) return
+  try { syncProfile(await uploadAvatar(file)); MessagePlugin.success('头像已更新') }
+  catch (cause) { MessagePlugin.error(errorMessage(cause, '头像上传失败')) }
+  finally { if (avatarInput.value) avatarInput.value.value = '' }
+}
+function connectorStatus(connector: Connector) {
+  if (connector.availability !== 'available') return '暂未开放'
+  return ({ unbound: '未绑定', active: '已绑定', paused: '已暂停', error: '异常', offline: '离线' } as Record<string, string>)[connector.status]
+}
+function connectorSummary(connector: Connector) {
+  if (connector.availability !== 'available') return '该连接器暂未开放'
+  if (!connector.bound) return `未绑定，绑定后开放${connector.display_name}知识库`
+  return connector.account_name || '已绑定，等待同步账号信息'
+}
+async function refreshConnectors() { connectors.value = await getConnectors() }
+async function handleConnector(connector: Connector) {
+  if (connector.bound) {
+    try { await unbindConnector(connector.platform as 'feishu' | 'wechat'); await refreshConnectors(); MessagePlugin.success(`已解除${connector.display_name}绑定`) }
+    catch (cause) { MessagePlugin.error(errorMessage(cause, '解除绑定失败')) }
+    return
   }
+  if (connector.platform === 'feishu') feishuDialogVisible.value = true
+  if (connector.platform === 'wechat') { wechatRebind.value = false; wechatForm.wxid = ''; wechatForm.db_dir = ''; wechatDialogVisible.value = true }
 }
-
-function confirmBind() {
-  if (!pendingSource.value) return
-  store.bindSource(pendingSource.value.key)
-  MessagePlugin.success(`${pendingSource.value.name}已绑定，知识库已开放`)
-  authDialogVisible.value = false
-  pendingSource.value = null
+async function confirmFeishuBind() {
+  try { window.location.assign(await getFeishuAuthorizeURL('bind')) }
+  catch (cause) { MessagePlugin.error(errorMessage(cause, '飞书授权暂不可用')) }
 }
+async function confirmWechatBind() {
+  if (!wechatForm.wxid.trim() || !wechatForm.db_dir.trim()) { MessagePlugin.warning('请填写微信 ID 和本机微信数据目录'); return }
+  try {
+    await bindWechat({ wxid: wechatForm.wxid.trim(), db_dir: wechatForm.db_dir.trim() }, wechatRebind.value)
+    wechatDialogVisible.value = false
+    await refreshConnectors()
+    MessagePlugin.success('个人微信已绑定')
+  } catch (cause) { MessagePlugin.error(errorMessage(cause, '个人微信绑定失败')) }
+}
+onMounted(loadPage)
 </script>
 
 <style lang="less" scoped>
@@ -167,6 +196,17 @@ function confirmBind() {
 
 .profile-hero__avatar:hover {
   box-shadow: 0 5px 19px rgba(31, 35, 41, .18);
+}
+
+.profile-hero__avatar img {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+}
+
+.avatar-file-input {
+  display: none;
 }
 
 .profile-hero__badge {
@@ -275,11 +315,12 @@ function confirmBind() {
 }
 
 .profile-setting-row__input {
-  width: min(280px, 100%);
+  width: min(420px, 55%);
   margin-left: auto;
 }
 
-.profile-setting-row__input :deep(.t-input) {
+.profile-setting-row__input :deep(.t-input),
+.profile-setting-row__input :deep(.t-input__inner) {
   border-color: transparent;
   background: transparent;
   text-align: right;

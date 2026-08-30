@@ -4,7 +4,7 @@ import { cloneMockState, type CollectionStatus, type InfoChat, type InfoFile, ty
 
 export const useInfoMockStore = defineStore('infoMock', () => {
   const initial = cloneMockState()
-  const isAuthenticated = ref(typeof sessionStorage !== 'undefined' && sessionStorage.getItem('info_agent_authenticated') === 'true')
+  const isAuthenticated = ref(typeof localStorage !== 'undefined' && !!localStorage.getItem('weknora_token'))
   const profile = ref<InfoProfile>(initial.profile)
   const sources = ref<InfoSource[]>(initial.sources)
   const qaSessions = ref(initial.qaSessions)
@@ -27,6 +27,10 @@ export const useInfoMockStore = defineStore('infoMock', () => {
   function logout() {
     isAuthenticated.value = false
     if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem('info_agent_authenticated')
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem('weknora_token')
+      localStorage.removeItem('weknora_refresh_token')
+    }
   }
 
   function findSource(key?: string | null) { return sources.value.find((item) => item.key === key) }

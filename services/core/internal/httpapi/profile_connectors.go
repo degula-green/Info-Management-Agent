@@ -108,7 +108,10 @@ func patchProfile(c *gin.Context, pool *pgxpool.Pool, cfg config.Config) {
 		apiError(c, http.StatusBadRequest, "invalid_nickname", "nickname must contain 1 to 64 characters")
 		return
 	}
-	if _, err := pool.Exec(c, `UPDATE identity.users SET nickname=$1,display_name=$1,updated_at=now() WHERE id=$2`, nickname, c.GetInt64("user_id")); err != nil {
+	// `nickname` is the authentication/profile field. Keep this update scoped
+	// to the profile contract; legacy display_name values may have independent
+	// constraints and are not part of the editable profile API.
+	if _, err := pool.Exec(c, `UPDATE identity.users SET nickname=$1,updated_at=now() WHERE id=$2`, nickname, c.GetInt64("user_id")); err != nil {
 		apiError(c, http.StatusInternalServerError, "profile_update_failed", "failed to update profile")
 		return
 	}

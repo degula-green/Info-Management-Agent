@@ -2,20 +2,41 @@
   <div class="wk-login">
     <div class="wk-login__brand"><img src="../assets/img/weknora.png" alt="WeKnora" /><span>Info Agent</span></div>
     <div class="wk-login__showcase"><div class="wk-login__showcase-inner"><div class="wk-login__network"><span v-for="n in 8" :key="n" :class="`network-node network-node--${n}`"><t-icon :name="n % 2 ? 'chat' : 'file'" /></span><span class="network-core"><t-icon name="search" /></span></div><h1>信息管理 Agent</h1><p>让跨平台对话成为可搜索、可追溯的私人知识。</p><div class="wk-login__chips"><span>飞书</span><span>企业微信</span><span>个人微信</span></div></div></div>
-    <div class="wk-login__form-wrap"><div class="wk-login__form-card"><div class="wk-login__tabs"><button :class="{ active: mode === 'login' }" @click="mode = 'login'">登录</button><button :class="{ active: mode === 'register' }" @click="mode = 'register'">注册</button></div><div class="wk-login__heading"><h2>{{ mode === 'login' ? '欢迎回来' : '创建账号' }}</h2><p>{{ mode === 'login' ? '使用邮箱和密码进入工作台' : '无需验证码，注册后即可登录' }}</p></div><t-form v-if="mode === 'login'" :data="loginForm" @submit="submitLogin"><t-form-item label="邮箱" name="email"><t-input v-model="loginForm.email" placeholder="请输入邮箱" /></t-form-item><t-form-item label="密码" name="password"><t-input v-model="loginForm.password" type="password" placeholder="请输入密码" /></t-form-item><t-alert v-if="error" theme="error" :message="error" /> <t-button theme="primary" block size="large" type="submit">登录</t-button><t-button variant="text" block @click="demoLogin">使用演示账号进入</t-button></t-form><t-form v-else :data="registerForm" @submit="submitRegister"><t-form-item label="用户名" name="username"><t-input v-model="registerForm.username" placeholder="请输入用户名" /></t-form-item><t-form-item label="邮箱" name="email"><t-input v-model="registerForm.email" placeholder="请输入邮箱" /></t-form-item><t-form-item label="密码" name="password"><t-input v-model="registerForm.password" type="password" placeholder="至少 6 位" /></t-form-item><t-form-item label="确认密码" name="confirm"><t-input v-model="registerForm.confirm" type="password" placeholder="再次输入密码" /></t-form-item><t-alert v-if="error" theme="error" :message="error" /><t-button theme="primary" block size="large" type="submit">注册</t-button></t-form><p v-if="notice" class="wk-login__notice">{{ notice }}</p></div><small class="wk-login__foot">原型模式 · 数据仅保存在当前浏览器</small></div>
+    <div class="wk-login__form-wrap"><div class="wk-login__form-card"><div class="wk-login__tabs"><button :class="{ active: mode === 'login' }" @click="mode = 'login'">登录</button><button :class="{ active: mode === 'register' }" @click="mode = 'register'">注册</button></div><div class="wk-login__heading"><h2>{{ mode === 'login' ? '欢迎回来' : '创建账号' }}</h2><p>{{ mode === 'login' ? '使用邮箱和密码进入工作台' : '无需验证码，注册后即可登录' }}</p></div><t-form v-if="mode === 'login'" :data="loginForm" @submit="submitLogin"><t-form-item label="邮箱" name="email"><t-input v-model="loginForm.email" placeholder="请输入邮箱" /></t-form-item><t-form-item label="密码" name="password"><t-input v-model="loginForm.password" type="password" placeholder="请输入密码" /></t-form-item><t-alert v-if="error" theme="error" :message="error" /> <t-button theme="primary" block size="large" type="submit" :loading="submitting">登录</t-button></t-form><t-form v-else :data="registerForm" @submit="submitRegister"><t-form-item label="用户名" name="username"><t-input v-model="registerForm.username" placeholder="请输入用户名" /></t-form-item><t-form-item label="邮箱" name="email"><t-input v-model="registerForm.email" placeholder="请输入邮箱" /></t-form-item><t-form-item label="密码" name="password"><t-input v-model="registerForm.password" type="password" placeholder="至少 6 位" /></t-form-item><t-form-item label="确认密码" name="confirm"><t-input v-model="registerForm.confirm" type="password" placeholder="再次输入密码" /></t-form-item><t-alert v-if="error" theme="error" :message="error" /><t-button theme="primary" block size="large" type="submit" :loading="submitting">注册</t-button></t-form><p v-if="notice" class="wk-login__notice">{{ notice }}</p></div><small class="wk-login__foot">账号信息由服务端安全保存</small></div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
+import { post } from '@/utils/request'
 
 const props = defineProps<{ initialMode?: 'login' | 'register' }>()
 const emit = defineEmits<{ (event: 'success', nickname: string, email: string): void; (event: 'registered', nickname: string, email: string): void }>()
-const mode = ref<'login' | 'register'>(props.initialMode ?? 'login'); const error = ref(''); const notice = ref(''); const loginForm = ref({ email: 'demo@example.com', password: 'demo123' }); const registerForm = ref({ username: '', email: '', password: '', confirm: '' })
+const mode = ref<'login' | 'register'>(props.initialMode ?? 'login'); const error = ref(''); const notice = ref(''); const submitting = ref(false); const loginForm = ref({ email: '', password: '' }); const registerForm = ref({ username: '', email: '', password: '', confirm: '' })
 watch(() => props.initialMode, (value) => { if (value) mode.value = value })
-function submitLogin() { error.value = ''; if (!loginForm.value.email || !loginForm.value.password) { error.value = '请输入邮箱和密码'; return }; emit('success', loginForm.value.email.split('@')[0] || '用户', loginForm.value.email) }
-function demoLogin() { loginForm.value = { email: 'demo@example.com', password: 'demo123' }; submitLogin() }
-function submitRegister() { error.value = ''; const form = registerForm.value; if (!form.username || !form.email || !form.password || !form.confirm) { error.value = '请完整填写注册信息'; return }; if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) { error.value = '请输入正确的邮箱格式'; return }; if (form.password !== form.confirm) { error.value = '两次输入的密码不一致'; return }; emit('registered', form.username, form.email) }
+async function submitLogin() {
+  error.value = ''
+  if (!loginForm.value.email || !loginForm.value.password) { error.value = '请输入邮箱和密码'; return }
+  submitting.value = true
+  try {
+    const result = await post<{ token: string; user: { nickname: string; username: string; email: string } }>('/api/auth/login', loginForm.value)
+    localStorage.setItem('weknora_token', result.token)
+    emit('success', result.user.nickname || result.user.username || result.user.email.split('@')[0], result.user.email)
+  } catch (cause: any) { error.value = cause?.message || '邮箱或密码错误' } finally { submitting.value = false }
+}
+async function submitRegister() {
+  error.value = ''; notice.value = ''
+  const form = registerForm.value
+  if (!form.username || !form.email || !form.password || !form.confirm) { error.value = '请完整填写注册信息'; return }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) { error.value = '请输入正确的邮箱格式'; return }
+  if (form.password !== form.confirm) { error.value = '两次输入的密码不一致'; return }
+  submitting.value = true
+  try {
+    await post('/api/auth/register', { username: form.username, nickname: form.username, email: form.email, password: form.password, confirm_password: form.confirm })
+    notice.value = '注册成功，请登录'
+    emit('registered', form.username, form.email)
+  } catch (cause: any) { error.value = cause?.message || '注册失败，请稍后重试' } finally { submitting.value = false }
+}
 </script>
 
 <style lang="less" scoped>
