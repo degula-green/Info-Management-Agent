@@ -35,7 +35,15 @@
         "type": "dense_vector",
         "dims": 1536,
         "index": true,
-        "similarity": "cosine"
+        "similarity": "cosine",
+        "index_options": {
+          "type": "bbq_hnsw",
+          "m": 16,
+          "ef_construction": 100,
+          "rescore_vector": {
+            "oversample": 3.0
+          }
+        }
       },
       "file_id": { "type": "keyword" },
       "project_id": { "type": "keyword" },
