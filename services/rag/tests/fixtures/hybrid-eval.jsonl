@@ -1,0 +1,20 @@
+{"id":"doc-001","question":"信息管理 Agent 第一版的核心目标是什么？","expected_files":["信息管理Agent第一版需求说明.docx"]}
+{"id":"doc-002","question":"第一版计划支持多少用户、多少个真实项目？","expected_files":["信息管理Agent第一版需求说明.docx"]}
+{"id":"doc-003","question":"系统如何记录消息来源，回答中需要展示哪些来源信息？","expected_files":["信息管理Agent第一版需求说明.docx"]}
+{"id":"doc-004","question":"文件上传后需要经过哪些处理步骤才能用于问答？","expected_files":["信息管理Agent第一版需求说明.docx"]}
+{"id":"doc-005","question":"哪些文件类型在第一版范围内？","expected_files":["信息管理Agent第一版需求说明.docx"]}
+{"id":"doc-006","question":"普通用户、项目成员、管理员和超级管理员的权限有什么区别？","expected_files":["信息管理Agent第一版需求说明.docx"]}
+{"id":"doc-007","question":"全局搜索需要支持哪些筛选条件？","expected_files":["信息管理Agent第一版需求说明.docx"]}
+{"id":"doc-008","question":"系统有哪些主要业务模块？","expected_files":["总模块分析.docx"]}
+{"id":"doc-009","question":"投递信息模块需要展示和筛选哪些字段？","expected_files":["总模块分析.docx"]}
+{"id":"doc-010","question":"面试通知模块如何通知候选人？","expected_files":["总模块分析.docx"]}
+{"id":"doc-011","question":"问答模块中管理员和普通用户分别可以做什么？","expected_files":["总模块分析.docx"]}
+{"id":"doc-012","question":"前端小组汇报 PPT 的目录包含哪些部分？","expected_files":["2026暑假青云前端第一组模板.pptx"]}
+{"id":"doc-013","question":"PPT 中关于登录安全的展示方案是什么？","expected_files":["2026暑假青云前端第一组模板.pptx"]}
+{"id":"doc-014","question":"PPT 中学习笔记使用了哪些地址或链接？","expected_files":["2026暑假青云前端第一组模板.pptx"]}
+{"id":"doc-015","question":"PPT 中算法分享部分提到了什么内容？","expected_files":["2026暑假青云前端第一组模板.pptx"]}
+{"id":"doc-016","question":"PPT 中下一阶段的学习计划是什么？","expected_files":["2026暑假青云前端第一组模板.pptx"]}
+{"id":"doc-017","question":"哪份文档描述了文件解析、Embedding 和 AI 问答引用要求？","expected_files":["信息管理Agent第一版需求说明.docx"]}
+{"id":"doc-018","question":"哪份材料同时包含 Git、MySQL、Redis 学习总结和前端小组汇报？","expected_files":["2026暑假青云前端第一组模板.pptx"]}
+{"id":"doc-019","question":"请比较需求说明中的权限设计和总模块分析中的角色权限设计。","expected_files":["信息管理Agent第一版需求说明.docx","总模块分析.docx"]}
+{"id":"doc-020","question":"这些材料中是否说明了如何处理没有足够证据的问题？","expected_files":["信息管理Agent第一版需求说明.docx"]}

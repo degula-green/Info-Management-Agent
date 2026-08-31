@@ -2,8 +2,9 @@
   <div class="info-shell" :class="{ 'info-shell--sidebar-collapsed': sidebarCollapsed }">
     <InfoSidebar
       :active="activeKey"
-      :nickname="store.profile.nickname"
-      :avatar="store.profile.avatar"
+      :nickname="sidebarNickname"
+      :avatar="sidebarAvatar"
+      :avatar-url="sidebarAvatarUrl"
       :qa-sessions="store.qaSessions"
       @navigate="navigate"
       @qa="openQaSession"
@@ -30,7 +31,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
 import InfoSidebar from '@/components/InfoSidebar.vue'
@@ -38,8 +39,23 @@ import InfoCommandPalette from '@/components/InfoCommandPalette.vue'
 import InfoResultDrawer from '@/components/InfoResultDrawer.vue'
 import { searchMock, type SearchResult } from '@/mock'
 import { useInfoMockStore } from '@/stores/infoMock'
+import { getProfile } from '@/api/info-profile'
 
 const store = useInfoMockStore(); const router = useRouter(); const route = useRoute()
+const sidebarNickname = ref(store.profile.nickname)
+const sidebarAvatar = ref(store.profile.avatar)
+const sidebarAvatarUrl = ref<string | null>(null)
+onMounted(async () => {
+  try {
+    const profile = await getProfile()
+    sidebarNickname.value = profile.nickname || profile.username || sidebarNickname.value
+    sidebarAvatarUrl.value = profile.avatar_url || null
+    sidebarAvatar.value = sidebarNickname.value.slice(0, 1) || sidebarAvatar.value
+    store.updateProfile({ nickname: sidebarNickname.value, email: profile.email, avatar: sidebarAvatar.value })
+  } catch {
+    // Keep the locally hydrated profile as a graceful fallback.
+  }
+})
 const sidebarCollapsed = ref(false); const paletteVisible = ref(false); const paletteQuery = ref(''); const paletteResults = ref<SearchResult[]>([]); const drawerVisible = ref(false); const drawerResult = ref<SearchResult | null>(null); const toastText = ref(''); const toastDialogVisible = ref(false); const protocolDialogVisible = ref(false); const protocolType = ref<'terms' | 'privacy'>('terms')
 const activeKey = computed(() => {
   if (paletteVisible.value) return 'search'

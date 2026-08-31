@@ -121,7 +121,10 @@ if ($env:RAG_DATABASE_URL) {
 } else {
     Write-Warning 'RAG_DATABASE_URL is missing; attachment parse worker was skipped.'
 }
-Start-ServiceWindow 'info-agent wechat collector :8100' $projectRoot "`$env:PYTHONPATH = '$ragRuntime;$projectRoot'; & '$python' -m uvicorn services.collectors.wechat.service:app --host 127.0.0.1 --port 8100"
+# WeChat uses its own Python/user-site dependencies (not the RAG target directory).
+# Mixing the RAG runtime here can load incompatible cffi/crypto binaries and
+# silently disable the MinIO attachment worker.
+Start-ServiceWindow 'info-agent wechat collector :8100' $projectRoot "`$env:PYTHONPATH = '$projectRoot'; & '$python' -m uvicorn services.collectors.wechat.service:app --host 127.0.0.1 --port 8100"
 if ($env:COLLECTOR_DATABASE_URL) {
     Start-ServiceWindow 'info-agent feishu collector' $feishuPath "& '$go' run . --watch"
     Start-ServiceWindow 'info-agent feishu attachment worker' $feishuPath "& '$go' run . -mode=attachment-worker"

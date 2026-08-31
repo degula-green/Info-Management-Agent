@@ -124,7 +124,7 @@ class WeChatRepository:
                 b.selected_conversations,b.history_start_at,b.config_updated_at
                 FROM ingestion.collector_bindings b JOIN ingestion.source_accounts sa ON sa.id=b.source_account_id
                 WHERE b.collector_type='wechat' AND b.enabled=true AND sa.status='active'
-                  AND (%s IS NULL OR sa.internal_account_id=%s)
+                  AND (%s::bigint IS NULL OR sa.internal_account_id=%s)
                 ORDER BY b.id""", (internal_account_id, internal_account_id)).fetchall()
         return [{"account_id": int(row[0]), "internal_account_id": int(row[1]), "wxid": row[2], "db_dir": row[3], "bound_at": row[4],
                 "selected_conversations": row[5] or [], "history_start_at": row[6], "config_updated_at": row[7]} for row in rows]

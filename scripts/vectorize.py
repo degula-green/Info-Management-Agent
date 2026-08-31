@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 project_root = Path(__file__).resolve().parents[1]
@@ -13,6 +14,8 @@ sys.path.insert(0, str(project_root / "services" / "rag"))
 
 from app.services.pgvector_store import PgVectorStore
 from app.services.vectorization import EmbeddingClient, message_chunks
+from app.services.index_service import delete_message_chunks, index_chunks
+from app.config import settings
 
 
 def read_messages(path: Path, limit: int) -> list[dict]:
@@ -46,6 +49,19 @@ def process_messages(messages: list[dict], store: PgVectorStore, embedder: Embed
             chunks = message_chunks({**message, "text": text})
             vectors = embedder.embed([chunk["content"] for chunk in chunks])
             chunks_count += store.replace_chunks(document_id, str(message.get("id", "")), chunks, vectors)
+            message_id = str(message.get("id", ""))
+            delete_message_chunks(message_id)
+            index_chunks([{**chunk,
+                           "document_id": document_id,
+                           "raw_message_id": raw_id,
+                           "embedding_model": settings.embedding_model,
+                           "embedding_version": settings.processor_version,
+                           "document_status": "completed",
+                           "is_deleted": bool(message.get("is_deleted")),
+                           "indexed_at": datetime.now(timezone.utc),
+                           "embedding": vector}
+                          for chunk, vector in zip(chunks, vectors)])
+            store.mark_completed(document_id)
             completed += 1
         except Exception as exc:
             if document_id is not None:

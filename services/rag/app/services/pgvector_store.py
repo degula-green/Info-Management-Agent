@@ -93,6 +93,38 @@ class PgVectorStore:
                 "external_sender_id": row[10], "text": row[11], "message_type": row[12],
                 "metadata": row[13] or {}, "occurred_at": row[14], "is_deleted": row[15], "is_updated": row[16]}
 
+    def citation_context(self, *, message_id: str | None = None, document_id: int | None = None,
+                         attachment_id: int | None = None, user_id: int | None = None) -> dict[str, Any] | None:
+        """Read citation identity from PG, optionally constrained to the JWT user."""
+        with self.connect() as conn:
+            if attachment_id is not None:
+                row = conn.execute("""SELECT d.id,a.id,m.id,m.source,COALESCE(p.display_name,''),
+                        COALESCE(c.name,''),c.conversation_type,m.occurred_at,a.file_name,
+                        COALESCE(d.metadata->>'document_summary',''),d.metadata->>'source_position'
+                    FROM vector_store.documents d JOIN ingestion.attachments a ON a.id=d.attachment_id
+                    JOIN ingestion.messages m ON m.id=a.message_id
+                    LEFT JOIN ingestion.participants p ON p.id=m.sender_id
+                    LEFT JOIN ingestion.conversations c ON c.id=m.conversation_id
+                    WHERE d.document_type='attachment' AND d.status='completed'
+                      AND (%s IS NULL OR d.id=%s) AND (%s IS NULL OR a.id=%s)
+                      AND (%s IS NULL OR a.user_id=%s)""",
+                    (document_id, document_id, attachment_id, attachment_id, user_id, user_id)).fetchone()
+                if not row: return None
+                keys = ("document_id","attachment_id","message_id","platform","sender_name","conversation_name",
+                        "conversation_type","sent_at","file_name","document_summary","source_position")
+                return dict(zip(keys, row))
+            if not message_id: return None
+            row = conn.execute("""SELECT m.id,m.source,COALESCE(p.display_name,''),COALESCE(c.name,''),
+                        c.conversation_type,m.occurred_at
+                    FROM ingestion.messages m LEFT JOIN ingestion.participants p ON p.id=m.sender_id
+                    LEFT JOIN ingestion.conversations c ON c.id=m.conversation_id
+                    JOIN ingestion.source_accounts sa ON sa.id=m.source_account_id
+                    WHERE m.id=%s AND m.is_deleted=false AND (%s IS NULL OR sa.internal_account_id=%s)""",
+                    (message_id, user_id, user_id)).fetchone()
+            if not row: return None
+            keys = ("message_id","platform","sender_name","conversation_name","conversation_type","sent_at")
+            return dict(zip(keys, row))
+
     def upsert_document(self, message: dict[str, Any], source_account_id: int, raw_message_id: int, status: str, content: str) -> int:
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         with self.connect() as conn:

@@ -56,6 +56,7 @@ def message_chunks(message: dict[str, Any]) -> list[dict[str, Any]]:
             "user_id": message.get("user_id"),
             "occurred_at": message.get("occurred_at"),
             "message_type": message.get("message_type"),
+            "conversation_name": message.get("conversation_name") or (message.get("metadata") or {}).get("conversation_name"),
             "metadata": message.get("metadata") or {},
         })
     return result
@@ -96,6 +97,10 @@ def document_chunks(document: dict[str, Any]) -> list[dict[str, Any]]:
             "external_sender_id": document.get("external_sender_id"),
             "user_id": document["user_id"], "occurred_at": document.get("occurred_at"),
             "message_type": "document", "file_id": str(document["attachment_id"]),
+            "attachment_id": int(document["attachment_id"]),
+            "file_name": document.get("file_name") or (document.get("metadata") or {}).get("file_name"),
+            "document_title": document.get("document_title") or heading,
+            "conversation_name": document.get("conversation_name") or (document.get("metadata") or {}).get("conversation_name"),
             "source_type": "attachment", "source_position": heading or str(position),
             "metadata": {**(document.get("metadata") or {}), "heading_path": [heading] if heading else []},
         })
@@ -111,14 +116,22 @@ class EmbeddingClient:
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not self.base_url or not self.api_key:
             raise RuntimeError("Embedding API is not configured (EMBEDDING_API_BASE_URL and EMBEDDING_API_KEY required)")
-        payload = json.dumps({"model": self.model, "input": texts, "dimensions": settings.embedding_dimension}).encode()
-        request = urllib.request.Request(
-            f"{self.base_url}/embeddings", data=payload,
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}, method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=60) as response:
-            body = json.loads(response.read().decode())
-        return [item["embedding"] for item in sorted(body["data"], key=lambda item: item["index"])]
+        # DashScope text-embedding-v4 accepts at most 10 inputs per request.
+        # Keep batching here so both message and attachment pipelines obey the
+        # provider limit regardless of their configured worker batch size.
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), 10):
+            batch = texts[start : start + 10]
+            payload = json.dumps({"model": self.model, "input": batch,
+                                  "dimensions": settings.embedding_dimension}).encode()
+            request = urllib.request.Request(
+                f"{self.base_url}/embeddings", data=payload,
+                headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}, method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=60) as response:
+                body = json.loads(response.read().decode())
+            vectors.extend(item["embedding"] for item in sorted(body["data"], key=lambda item: item["index"]))
+        return vectors
 
 
 @dataclass

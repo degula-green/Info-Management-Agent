@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from elasticsearch import Elasticsearch, helpers
 
 from app.config import settings
@@ -12,14 +15,43 @@ def client() -> Elasticsearch:
     return Elasticsearch(settings.elasticsearch_url, **kwargs)
 
 
+def _mapping_definition() -> dict:
+    path = Path(__file__).resolve().parents[2] / "config" / "elasticsearch" / "documents-index.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def ensure_index(es: Elasticsearch | None = None) -> None:
+    """Create the chunk index or add the v2 fields to an existing index."""
+    es = es or client()
+    definition = _mapping_definition()
+    index = settings.elasticsearch_index
+    if not es.indices.exists(index=index):
+        es.indices.create(index=index, settings=definition.get("settings", {}), mappings=definition.get("mappings", {}))
+        return
+    properties = definition.get("mappings", {}).get("properties", {})
+    if properties:
+        es.indices.put_mapping(index=index, properties=properties)
+
+
 def index_chunks(chunks: list[dict]) -> None:
     for chunk in chunks:
         vector = chunk.get("embedding")
         if not isinstance(vector, list) or len(vector) != settings.embedding_dimension:
             raise ValueError(f"Embedding dimension mismatch: expected {settings.embedding_dimension}")
-    actions = [{"_index": settings.elasticsearch_index, "_id": chunk["chunk_id"], "_source": chunk} for chunk in chunks]
+    es = client()
+    ensure_index(es)
+    actions = []
+    for chunk in chunks:
+        source = {**chunk}
+        source.setdefault("document_status", "completed")
+        if "attachment_id" not in source and source.get("file_id") is not None:
+            try:
+                source["attachment_id"] = int(source["file_id"])
+            except (TypeError, ValueError):
+                pass
+        actions.append({"_index": settings.elasticsearch_index, "_id": chunk["chunk_id"], "_source": source})
     if actions:
-        helpers.bulk(client(), actions, raise_on_error=True, raise_on_exception=True)
+        helpers.bulk(es, actions, raise_on_error=True, raise_on_exception=True)
 
 
 def delete_message_chunks(message_id: str) -> None:

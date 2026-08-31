@@ -13,6 +13,7 @@ from app.services.worker import VectorizationWorker
 app = FastAPI(title="info-agent-rag", version="0.1.0")
 app.include_router(health.router)
 app.include_router(search.router)
+app.include_router(search.qa_router)
 worker: VectorizationWorker | None = None
 message_value_evaluator = MessageValueEvaluator()
 

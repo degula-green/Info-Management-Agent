@@ -392,11 +392,14 @@ func unbindConnector(c *gin.Context, pool *pgxpool.Pool, cfg config.Config, redi
 		apiError(c, http.StatusInternalServerError, "connector_unbind_failed", "failed to load connector")
 		return
 	}
-	if _, err = tx.Exec(c, `UPDATE ingestion.collector_bindings SET enabled=false,updated_at=now() WHERE source_account_id=$1 AND collector_type=$2`, accountID, platform); err != nil {
-		apiError(c, http.StatusInternalServerError, "connector_unbind_failed", "failed to stop connector")
+	if _, err = tx.Exec(c, `DELETE FROM ingestion.collector_bindings WHERE source_account_id=$1 AND collector_type=$2`, accountID, platform); err != nil {
+		apiError(c, http.StatusInternalServerError, "connector_unbind_failed", "failed to remove connector binding")
 		return
 	}
-	if _, err = tx.Exec(c, `UPDATE ingestion.source_accounts SET status='inactive',updated_at=now() WHERE id=$1`, accountID); err != nil {
+	// Keep source_accounts as a historical parent for messages/attachments;
+	// deleting it would cascade-delete the collected data. Disabled is the
+	// schema-supported unbound state.
+	if _, err = tx.Exec(c, `UPDATE ingestion.source_accounts SET status='disabled',credential_ref=NULL,updated_at=now() WHERE id=$1`, accountID); err != nil {
 		apiError(c, http.StatusInternalServerError, "connector_unbind_failed", "failed to deactivate connector")
 		return
 	}
@@ -407,8 +410,11 @@ func unbindConnector(c *gin.Context, pool *pgxpool.Pool, cfg config.Config, redi
 		apiError(c, http.StatusInternalServerError, "connector_unbind_failed", "failed to commit unbind")
 		return
 	}
-	if platform == "feishu" && redisClient != nil {
-		_ = redisClient.Delete(context.WithoutCancel(c), "credential:feishu:"+externalID)
+	if redisClient != nil {
+		// Clear connector credentials immediately. The WeChat collector normally
+		// uses local credentials, but deleting the namespaced key is harmless and
+		// covers deployments that persist them in Redis.
+		_ = redisClient.Delete(context.WithoutCancel(c), "credential:"+platform+":"+externalID)
 	}
 	if platform == "wechat" {
 		userID := c.GetInt64("user_id")

@@ -78,6 +78,7 @@ class VectorizationWorker:
                                    "raw_message_id": message.get("raw_message_id"),
                                    "embedding_model": settings.embedding_model,
                                    "embedding_version": settings.processor_version,
+                                   "document_status": "completed",
                                    "is_deleted": bool(message.get("is_deleted")),
                                    "indexed_at": datetime.now(timezone.utc),
                                    "embedding": vector}
@@ -104,6 +105,7 @@ class VectorizationWorker:
             delete_document_chunks(document_id)
             index_chunks([{**chunk, "raw_message_id": document.get("raw_message_id"),
                            "embedding_model": settings.embedding_model, "embedding_version": settings.processor_version,
+                           "document_status": "completed",
                            "is_deleted": bool(document.get("is_deleted")), "indexed_at": datetime.now(timezone.utc),
                            "embedding": vector} for chunk, vector in zip(chunks, vectors)])
             self.store.mark_completed(document_id)

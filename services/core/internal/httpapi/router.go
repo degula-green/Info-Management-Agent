@@ -64,6 +64,7 @@ func NewRouter(pool *pgxpool.Pool, cfg config.Config, redisClient *redisstore.Cl
 	r.GET("/health", func(c *gin.Context) { health(c, pool) })
 	r.GET("/api/info", info)
 	protected := authRequired(cfg)
+	r.POST("/api/qa/ask", protected, func(c *gin.Context) { askQuestion(c, pool, cfg) })
 	r.GET("/api/profile", protected, func(c *gin.Context) { getProfile(c, pool, cfg) })
 	r.PATCH("/api/profile", protected, func(c *gin.Context) { patchProfile(c, pool, cfg) })
 	r.POST("/api/profile/avatar", protected, func(c *gin.Context) { uploadProfileAvatar(c, pool, cfg) })
@@ -495,7 +496,11 @@ func proxyWechat(c *gin.Context, cfg config.Config, path string) {
 		req.Header.Set("X-Info-Agent-User-ID", strconv.FormatInt(userID, 10))
 	}
 	req.Header.Set("X-Info-Agent-Collector-Token", cfg.CollectorToken)
-	resp, err := http.DefaultClient.Do(req)
+	// Do not let an unavailable RAG service leave the browser's SSE request
+	// hanging forever. ResponseHeaderTimeout bounds connection/startup time;
+	// once streaming has started, cancellation still follows the client context.
+	ragClient := &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 15 * time.Second}}
+	resp, err := ragClient.Do(req)
 	if err != nil {
 		c.JSON(503, gin.H{"error": "wechat collector unavailable"})
 		return
@@ -503,6 +508,118 @@ func proxyWechat(c *gin.Context, cfg config.Config, path string) {
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	c.Data(resp.StatusCode, "application/json", data)
+}
+
+func askQuestion(c *gin.Context, pool *pgxpool.Pool, cfg config.Config) {
+	var input struct {
+		Question        string   `json:"question"`
+		Platforms       []string `json:"platforms"`
+		ConversationIDs []int64  `json:"conversation_ids"`
+		TopK            int      `json:"top_k"`
+	}
+	if c.ShouldBindJSON(&input) != nil || strings.TrimSpace(input.Question) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "question is required"})
+		return
+	}
+	if input.Platforms == nil {
+		input.Platforms = []string{}
+	}
+	if input.ConversationIDs == nil {
+		input.ConversationIDs = []int64{}
+	}
+	if input.TopK < 1 || input.TopK > 10 {
+		input.TopK = 8
+	}
+	userID := c.GetInt64("user_id")
+	rows, err := pool.Query(c, `SELECT sa.id, sa.platform, COALESCE(b.selected_conversations,'[]'::jsonb)
+        FROM ingestion.source_accounts sa LEFT JOIN ingestion.collector_bindings b
+          ON b.source_account_id=sa.id AND b.collector_type=sa.platform AND b.enabled=true
+        WHERE sa.internal_account_id=$1 AND sa.status='active'`, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve search scope"})
+		return
+	}
+	defer rows.Close()
+	accounts := []int64{}
+	conversations := []int64{}
+	for rows.Next() {
+		var account int64
+		var platform string
+		var selected []byte
+		if rows.Scan(&account, &platform, &selected) != nil {
+			continue
+		}
+		if len(input.Platforms) > 0 {
+			allowed := false
+			for _, wanted := range input.Platforms {
+				if wanted == platform {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				continue
+			}
+		}
+		var externalIDs []string
+		if json.Unmarshal(selected, &externalIDs) != nil || len(externalIDs) == 0 {
+			continue
+		}
+		conversationRows, queryErr := pool.Query(c, `SELECT id FROM ingestion.conversations
+			WHERE source_account_id=$1 AND external_conversation_id = ANY($2::text[])`, account, externalIDs)
+		if queryErr != nil {
+			continue
+		}
+		accountConversationCount := 0
+		for conversationRows.Next() {
+			var id int64
+			if conversationRows.Scan(&id) == nil {
+				conversations = append(conversations, id)
+				accountConversationCount++
+			}
+		}
+		conversationRows.Close()
+		if accountConversationCount > 0 {
+			accounts = append(accounts, account)
+		}
+	}
+	if len(input.ConversationIDs) > 0 {
+		allowed := make(map[int64]struct{}, len(input.ConversationIDs))
+		for _, id := range input.ConversationIDs {
+			allowed[id] = struct{}{}
+		}
+		filtered := conversations[:0]
+		for _, id := range conversations {
+			if _, ok := allowed[id]; ok {
+				filtered = append(filtered, id)
+			}
+		}
+		conversations = filtered
+		// An explicit conversation scope that has no permitted intersection
+		// must fail closed; an empty list otherwise means "all conversations"
+		// to the RAG service.
+		if len(conversations) == 0 {
+			accounts = []int64{}
+		}
+	}
+	payload, _ := json.Marshal(gin.H{"question": input.Question, "platforms": input.Platforms, "top_k": input.TopK,
+		"scope": gin.H{"user_id": userID, "source_account_ids": accounts, "conversation_ids": conversations}})
+	req, err := http.NewRequestWithContext(c, http.MethodPost, strings.TrimRight(cfg.RAGServiceURL, "/")+"/qa/ask", bytes.NewReader(payload))
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "rag request failed"})
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "rag service unavailable"})
+		return
+	}
+	defer resp.Body.Close()
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Status(resp.StatusCode)
+	io.Copy(c.Writer, resp.Body)
 }
 
 type connectorConfigInput struct {

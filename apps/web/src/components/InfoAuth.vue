@@ -9,9 +9,11 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { post } from '@/utils/request'
+import { useAuthStore } from '@/stores/auth'
 
 const props = defineProps<{ initialMode?: 'login' | 'register' }>()
 const emit = defineEmits<{ (event: 'success', nickname: string, email: string): void; (event: 'registered', nickname: string, email: string): void }>()
+const authStore = useAuthStore()
 const mode = ref<'login' | 'register'>(props.initialMode ?? 'login'); const error = ref(''); const notice = ref(''); const submitting = ref(false); const loginForm = ref({ email: '', password: '' }); const registerForm = ref({ username: '', email: '', password: '', confirm: '' })
 watch(() => props.initialMode, (value) => { if (value) mode.value = value })
 async function submitLogin() {
@@ -19,9 +21,13 @@ async function submitLogin() {
   if (!loginForm.value.email || !loginForm.value.password) { error.value = '请输入邮箱和密码'; return }
   submitting.value = true
   try {
-    const result = await post<{ token: string; user: { nickname: string; username: string; email: string } }>('/api/auth/login', loginForm.value)
-    localStorage.setItem('weknora_token', result.token)
-    emit('success', result.user.nickname || result.user.username || result.user.email.split('@')[0], result.user.email)
+    const response = await post<{ token: string; user: { nickname: string; username: string; email: string } }>('/api/auth/login', loginForm.value)
+    const body = (response as any)?.data ?? response
+    const result = (body?.data ?? body) as { token?: string; user?: { nickname?: string; username?: string; email?: string } }
+    if (!result?.token || !result?.user) throw new Error('登录响应无效')
+    authStore.setToken(result.token)
+    const email = result.user.email || loginForm.value.email
+    emit('success', result.user.nickname || result.user.username || email.split('@')[0], email)
   } catch (cause: any) { error.value = cause?.message || '邮箱或密码错误' } finally { submitting.value = false }
 }
 async function submitRegister() {

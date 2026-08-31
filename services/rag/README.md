@@ -25,8 +25,20 @@ python scripts/vectorize.py --input data/collector-feishu/normalized/messages.js
 
 RAG 服务也提供 `POST /ingest`，请求体为 `{ "messages": [...] }`，便于后续由
 Core/outbox 调用。需要配置 `EMBEDDING_API_BASE_URL`、`EMBEDDING_API_KEY` 和
-PostgreSQL、Embedding API 和 Elasticsearch 连接信息。Elasticsearch 在本阶段保留，
-不参与向量写入。
+PostgreSQL、Embedding API 和 Elasticsearch 连接信息。消息向量化成功后会同时写入
+PostgreSQL 和 Elasticsearch；ES 写入失败时文档不会被标记为 completed，便于重试和对账。
+
+## 混合问答接口
+
+内部接口为 `POST /qa/ask`，由 Core 在 JWT 校验后调用。请求必须包含服务端计算的权限范围：
+
+```json
+{"question":"项目为什么延期？","platforms":["feishu"],"top_k":8,"scope":{"user_id":7,"source_account_ids":[11],"conversation_ids":[31]}}
+```
+
+响应为 `text/event-stream`，事件顺序至少为 `meta`、一个或多个 `delta`/`citation`、`done`；检索失败时发送 `error` 后仍发送 `done`。无证据时 `delta` 为“当前采集的信息中没有找到足够依据。”且 `done.citations` 为空。
+
+问答生成可选配置 `QA_API_BASE_URL`、`QA_API_KEY`、`QA_MODEL`。未配置或调用失败时使用检索片段回退。所有 BM25/kNN 查询都必须带 `document_status=completed` 和 SearchScope 过滤器。
 
 ## 消息价值判断
 

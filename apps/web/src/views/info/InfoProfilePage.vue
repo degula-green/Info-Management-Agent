@@ -49,7 +49,7 @@
             </div>
             <t-tag :theme="connector.bound ? 'success' : 'default'" variant="light">{{ connectorStatus(connector) }}</t-tag>
             <t-button :theme="connector.bound ? 'default' : 'primary'" :variant="connector.bound ? 'outline' : 'base'" size="small" :disabled="connector.availability !== 'available'" @click="handleConnector(connector)">
-              {{ connector.bound ? '解除绑定' : connector.availability === 'available' ? `绑定${connector.display_name}` : '暂未开放' }}
+              {{ connectorActionLabel(connector) }}
             </t-button>
           </div>
         </div>
@@ -134,6 +134,11 @@ function connectorSummary(connector: Connector) {
   if (connector.availability !== 'available') return '该连接器暂未开放'
   if (!connector.bound) return `未绑定，绑定后开放${connector.display_name}知识库`
   return connector.account_name || '已绑定，等待同步账号信息'
+}
+function connectorActionLabel(connector: Connector) {
+  if (connector.bound) return '解除绑定'
+  if (connector.availability !== 'available') return '暂未开放'
+  return '绑定'
 }
 async function refreshConnectors() { connectors.value = await getConnectors() }
 async function handleConnector(connector: Connector) {
@@ -335,6 +340,27 @@ onMounted(loadPage)
 .connector-row {
   gap: 14px;
   min-height: 84px;
+}
+
+/* Keep the status and action columns on a shared grid. Without fixed tracks,
+   labels such as “绑定个人微信” push each row's button to a different x
+   position. */
+.connector-row > :deep(.t-tag) {
+  display: inline-flex;
+  flex: 0 0 54px;
+  width: 54px;
+  justify-content: center;
+  box-sizing: border-box;
+  text-align: center;
+}
+
+.connector-row > :deep(.t-button) {
+  flex: 0 0 64px;
+  width: 64px;
+  justify-content: center;
+  box-sizing: border-box;
+  padding-right: 8px;
+  padding-left: 8px;
 }
 
 .connector-mark {

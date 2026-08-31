@@ -23,6 +23,7 @@ type Config struct {
 	WebBaseURL         string
 	JWTSecret          string
 	WechatCollectorURL string
+	RAGServiceURL      string
 	CollectorToken     string
 }
 
@@ -48,6 +49,7 @@ func Load() Config {
 		WebBaseURL:         env("CORE_WEB_BASE_URL", "http://localhost:5174"),
 		JWTSecret:          env("CORE_JWT_SECRET", "change-me-in-production"),
 		WechatCollectorURL: env("WECHAT_COLLECTOR_URL", "http://127.0.0.1:8100"),
+		RAGServiceURL:      env("RAG_SERVICE_URL", "http://127.0.0.1:8000"),
 		CollectorToken:     env("COLLECTOR_INTERNAL_TOKEN", "local-development-only"),
 	}
 }

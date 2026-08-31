@@ -35,6 +35,8 @@ class DocumentChunkTests(unittest.TestCase):
         self.assertEqual([item["chunk_id"] for item in first], [item["chunk_id"] for item in second])
         self.assertEqual(first[0]["metadata"]["heading_path"], ["Agenda"])
         self.assertEqual(first[0]["file_id"], "8")
+        self.assertEqual(first[0]["attachment_id"], 8)
+        self.assertEqual(first[0]["document_title"], "Agenda")
 
 
 if __name__ == "__main__":

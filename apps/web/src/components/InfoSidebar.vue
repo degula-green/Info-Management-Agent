@@ -95,7 +95,10 @@
         aria-haspopup="menu"
         @click.stop="userMenuOpen = !userMenuOpen"
       >
-        <span class="sidebar-user__avatar">{{ avatarLabel }}</span>
+        <span class="sidebar-user__avatar">
+          <img v-if="avatarUrl" :src="avatarUrl" alt="" />
+          <span v-else>{{ avatarLabel }}</span>
+        </span>
         <span v-if="!collapsed" class="sidebar-user__name">{{ nickname }}</span>
         <t-icon v-if="!collapsed" :name="userMenuOpen ? 'chevron-up' : 'chevron-down'" class="sidebar-user__chevron" />
       </button>
@@ -117,6 +120,7 @@ const props = defineProps<{
   active: string
   nickname: string
   avatar?: string
+  avatarUrl?: string | null
   qaSessions: QASession[]
 }>()
 
@@ -465,6 +469,7 @@ const navItems = [
   font-size: 11px;
   font-weight: 600;
 }
+.sidebar-user__avatar img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
 
 .info-sidebar--collapsed .sidebar-user__avatar {
   width: 34px;
