@@ -83,15 +83,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { Renderer } from 'marked'
 import { sourceName, type InfoSource, type SourceKey } from '@/mock'
 import { useInfoMockStore } from '@/stores/infoMock'
 import { useAuthStore } from '@/stores/auth'
 import { renderChatMarkdown } from '@/utils/chatMarkdownRenderer'
 import { sanitizeMarkdownHTML, safeMarkdownToHTML } from '@/utils/security'
+import { createQaConversation, deleteQaConversation, getQaConversation } from '@/api/qa-history'
 
 type Scope = SourceKey | 'all'
 type Mode = 'quick' | 'deep'
@@ -101,6 +102,7 @@ type QaMessage = { role: 'user' | 'assistant'; text: string; citations?: QaCitat
 const store = useInfoMockStore()
 const auth = useAuthStore()
 const router = useRouter()
+const route = useRoute()
 const question = ref('')
 const scope = ref<Scope>('all')
 const mode = ref<Mode>('quick')
@@ -114,6 +116,7 @@ const textareaRef = ref<{ focus?: () => void } | null>(null)
 const loading = ref(false)
 const qaMarkdownRenderer = new Renderer()
 const expandedCitations = ref<Record<number, boolean>>({})
+const conversationId = ref<number | null>(route.query.session ? Number(route.query.session) : null)
 
 function renderQaMarkdown(text: string, streaming = false): string {
   return renderChatMarkdown(text, {
@@ -244,6 +247,9 @@ async function sendQuestion() {
   const text = question.value.trim()
   if (!text || loading.value) return
   closeMenus()
+  if (!conversationId.value) {
+    try { const created = await createQaConversation(); conversationId.value = created.id; await router.replace({ path: '/chat', query: { session: String(created.id) } }) } catch { MessagePlugin.error('创建问答会话失败'); return }
+  }
   messages.value.push({ role: 'user', text })
   // Keep the object itself reactive: mutating a raw object after pushing it
   // into a reactive array does not notify Vue and leaves the answer paragraph
@@ -259,7 +265,7 @@ async function sendQuestion() {
     }
     const controller = new AbortController()
     const timeout = window.setTimeout(() => controller.abort(), 60000)
-    const response = await fetch('/api/qa/ask', {
+    const response = await fetch(`/api/qa/conversations/${conversationId.value}/ask`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', Authorization: `Bearer ${accessToken}` },
       // Core resolves the authenticated user's source/conversation scope from
@@ -293,8 +299,29 @@ function onDocumentPointerdown(event: PointerEvent) {
   if (!pageRef.value?.contains(event.target as Node)) closeMenus()
 }
 
-onMounted(() => document.addEventListener('pointerdown', onDocumentPointerdown))
-onBeforeUnmount(() => document.removeEventListener('pointerdown', onDocumentPointerdown))
+async function loadConversation() {
+  if (!conversationId.value || !Number.isFinite(conversationId.value)) return
+  try {
+    const detail = await getQaConversation(conversationId.value)
+    for (const record of detail.messages || []) {
+      messages.value.push({ role: 'user', text: record.question })
+      messages.value.push({ role: 'assistant', text: record.answer || (record.answer_status === 'failed' ? '本次回答失败，请重试。' : ''), citations: record.citations || [] })
+    }
+  } catch { MessagePlugin.error('加载历史会话失败') }
+}
+
+onMounted(() => { document.addEventListener('pointerdown', onDocumentPointerdown); void loadConversation() })
+watch(() => route.query.session, async (value) => {
+  const next = value ? Number(value) : null
+  if (next === conversationId.value) return
+  conversationId.value = next
+  messages.value = []
+  await loadConversation()
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', onDocumentPointerdown)
+  if (conversationId.value && messages.value.length === 0) void deleteQaConversation(conversationId.value)
+})
 </script>
 
 <style lang="less" scoped>

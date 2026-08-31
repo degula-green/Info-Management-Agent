@@ -5,9 +5,11 @@
       :nickname="sidebarNickname"
       :avatar="sidebarAvatar"
       :avatar-url="sidebarAvatarUrl"
-      :qa-sessions="store.qaSessions"
+      :qa-sessions="qaConversations.map((item) => ({ id: String(item.id), question: item.title, answer: '', summary: `${item.message_count} 条问答`, source: '全部数据', time: item.last_message_at || '' }))"
       @navigate="navigate"
       @qa="openQaSession"
+      @qa-rename="renameQaSession"
+      @qa-delete="deleteQaSession"
       @collapsed-change="sidebarCollapsed = $event"
       @menu-action="handleUserMenuAction"
     />
@@ -18,7 +20,7 @@
       </header>
       <div class="info-shell__content"><RouterView /></div>
     </main>
-    <InfoCommandPalette :visible="paletteVisible" :query="paletteQuery" :results="paletteResults" :recent-searches="store.recentSearches" @update:visible="paletteVisible = $event" @search="runPaletteSearch" @select="selectPaletteResult" />
+    <InfoCommandPalette :visible="paletteVisible" :query="paletteQuery" :results="paletteResults" :loading="paletteLoading" :recent-searches="store.recentSearches" @update:visible="paletteVisible = $event" @search="runPaletteSearch" @select="selectPaletteResult" />
     <InfoResultDrawer v-model:visible="drawerVisible" :result="drawerResult" @toast="toast" @save="saveDrawerResult" />
     <t-dialog v-model:visible="toastDialogVisible" header="提示" :footer="false" width="360px"><p class="info-toast-dialog">{{ toastText }}</p></t-dialog>
     <t-dialog v-model:visible="protocolDialogVisible" :header="protocolTitle" :footer="false" width="520px">
@@ -31,20 +33,28 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
 import InfoSidebar from '@/components/InfoSidebar.vue'
 import InfoCommandPalette from '@/components/InfoCommandPalette.vue'
 import InfoResultDrawer from '@/components/InfoResultDrawer.vue'
-import { searchMock, type SearchResult } from '@/mock'
+import { type SearchResult } from '@/mock'
 import { useInfoMockStore } from '@/stores/infoMock'
 import { getProfile } from '@/api/info-profile'
+import { searchInfo } from '@/api/info-search'
+import { listQaConversations, type QaConversation } from '@/api/qa-history'
+import { renameQaConversation, deleteQaConversation } from '@/api/qa-history'
 
 const store = useInfoMockStore(); const router = useRouter(); const route = useRoute()
-const sidebarNickname = ref(store.profile.nickname)
-const sidebarAvatar = ref(store.profile.avatar)
+// Keep the mock profile out of the initial render; the profile API is authoritative.
+const sidebarNickname = ref('')
+const sidebarAvatar = ref('')
 const sidebarAvatarUrl = ref<string | null>(null)
+const qaConversations = ref<QaConversation[]>([])
+async function refreshQaConversations() {
+  try { qaConversations.value = (await listQaConversations()).items || [] } catch { qaConversations.value = [] }
+}
 onMounted(async () => {
   try {
     const profile = await getProfile()
@@ -53,19 +63,28 @@ onMounted(async () => {
     sidebarAvatar.value = sidebarNickname.value.slice(0, 1) || sidebarAvatar.value
     store.updateProfile({ nickname: sidebarNickname.value, email: profile.email, avatar: sidebarAvatar.value })
   } catch {
-    // Keep the locally hydrated profile as a graceful fallback.
+    sidebarNickname.value = store.profile.nickname
+    sidebarAvatar.value = store.profile.avatar
   }
+  await refreshQaConversations()
 })
-const sidebarCollapsed = ref(false); const paletteVisible = ref(false); const paletteQuery = ref(''); const paletteResults = ref<SearchResult[]>([]); const drawerVisible = ref(false); const drawerResult = ref<SearchResult | null>(null); const toastText = ref(''); const toastDialogVisible = ref(false); const protocolDialogVisible = ref(false); const protocolType = ref<'terms' | 'privacy'>('terms')
+watch(() => route.fullPath, () => { void refreshQaConversations() })
+const sidebarCollapsed = ref(false); const paletteVisible = ref(false); const paletteQuery = ref(''); const paletteResults = ref<SearchResult[]>([]); const paletteLoading = ref(false); const drawerVisible = ref(false); const drawerResult = ref<SearchResult | null>(null); const toastText = ref(''); const toastDialogVisible = ref(false); const protocolDialogVisible = ref(false); const protocolType = ref<'terms' | 'privacy'>('terms'); let paletteSearchTimer: ReturnType<typeof setTimeout> | undefined; let paletteSearchSeq = 0
 const activeKey = computed(() => {
   if (paletteVisible.value) return 'search'
   if (route.name === 'chat') return 'new-chat'; if (route.name === 'search') return 'search'; if (route.name === 'knowledge' || route.name === 'knowledgePlatform' || route.params.platform) return 'knowledge'; if (route.name === 'profile') return 'profile'; return 'new-chat'
 })
 const pageTitle = computed(() => ({ dashboard: '概览', search: '搜索', knowledge: '知识库', chat: '新对话', profile: '个人中心' } as Record<string, string>)[String(route.name)] || (route.params.platform ? store.findSource(String(route.params.platform))?.kbName || '知识库' : '概览'))
 
-function navigate(view: string) {
+async function navigate(view: string) {
   if (view === 'search') { openSearch(); return }
-  router.push(view === 'new-chat' ? '/chat' : view === 'knowledge' ? '/knowledge' : view === 'profile' || view === 'capabilities' ? '/profile' : '/dashboard')
+  if (view === 'new-chat') {
+    // Creating a conversation is deferred until the first question is sent.
+    // Repeated clicks on "新对话" must not create empty history rows.
+    if (route.name !== 'chat' || route.query.session) router.push('/chat')
+    return
+  }
+  router.push(view === 'knowledge' ? '/knowledge' : view === 'profile' || view === 'capabilities' ? '/profile' : '/dashboard')
 }
 const protocolTitle = computed(() => protocolType.value === 'terms' ? '用户协议' : '隐私协议')
 const protocolText = computed(() => protocolType.value === 'terms'
@@ -77,11 +96,31 @@ function handleUserMenuAction(action: 'profile' | 'terms' | 'privacy' | 'logout'
   store.logout(); router.push('/login')
 }
 function openQaSession(id: string) { router.push({ path: '/chat', query: { session: id } }) }
+async function renameQaSession(id: string) { const current = qaConversations.value.find((item) => String(item.id) === id); const title = window.prompt('请输入会话名称', current?.title || ''); if (!title?.trim()) return; try { const updated = await renameQaConversation(id, title.trim()); if (current) current.title = updated.title } catch { MessagePlugin.error('重命名失败') } }
+async function deleteQaSession(id: string) { if (!window.confirm('确定删除这条问答历史吗？')) return; try { await deleteQaConversation(id); qaConversations.value = qaConversations.value.filter((item) => String(item.id) !== id); if (route.query.session === id) router.push('/chat') } catch { MessagePlugin.error('删除历史失败') } }
 function openSearch() { paletteQuery.value = ''; paletteResults.value = []; paletteVisible.value = true }
 function runPaletteSearch(query: string, committed = false) {
   paletteQuery.value = query
-  paletteResults.value = searchMock(query, 'all', store.sources, store.qaSessions)
-  if (committed && query.trim()) store.addRecentSearch(query)
+  if (paletteSearchTimer) clearTimeout(paletteSearchTimer)
+  const normalized = query.trim()
+  if (normalized.length < 2) { paletteResults.value = []; paletteLoading.value = false; return }
+  const seq = ++paletteSearchSeq
+  paletteLoading.value = true
+  paletteSearchTimer = setTimeout(async () => {
+    try {
+      const response = await searchInfo({ query: normalized, page: 1, page_size: 20 }) as any
+      if (seq !== paletteSearchSeq) return
+      paletteLoading.value = false
+      paletteResults.value = (Array.isArray(response?.items) ? response.items : []).filter((item: any) => item.kind !== 'qa').map((item: any) => ({
+        id: String(item.id), kind: item.kind === 'file' ? 'file' : item.kind === 'chat' ? 'chat' : 'message',
+        title: item.title || '消息', subtitle: item.highlight || item.subtitle || item.content || '', source: item.platform || item.source || 'wechat',
+        platform: item.platform || item.source || 'wechat', chatId: item.conversation_id ? String(item.conversation_id) : undefined,
+        recordId: item.message_id || item.attachment_id ? String(item.message_id || item.attachment_id) : undefined,
+        content: item.content, sender: item.sender_name, time: item.occurred_at, score: item.score,
+      }))
+      if (committed) store.addRecentSearch(normalized)
+    } catch { if (seq === paletteSearchSeq) { paletteResults.value = []; paletteLoading.value = false } }
+  }, 180)
 }
 function selectPaletteResult(result: SearchResult) {
   paletteVisible.value = false

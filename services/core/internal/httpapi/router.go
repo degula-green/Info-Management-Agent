@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/hmac"
@@ -65,6 +66,13 @@ func NewRouter(pool *pgxpool.Pool, cfg config.Config, redisClient *redisstore.Cl
 	r.GET("/api/info", info)
 	protected := authRequired(cfg)
 	r.POST("/api/qa/ask", protected, func(c *gin.Context) { askQuestion(c, pool, cfg) })
+	r.POST("/api/qa/conversations", protected, func(c *gin.Context) { createQAConversation(c, pool) })
+	r.GET("/api/qa/conversations", protected, func(c *gin.Context) { listQAConversations(c, pool) })
+	r.GET("/api/qa/conversations/:id", protected, func(c *gin.Context) { getQAConversation(c, pool) })
+	r.PATCH("/api/qa/conversations/:id", protected, func(c *gin.Context) { updateQAConversation(c, pool) })
+	r.DELETE("/api/qa/conversations/:id", protected, func(c *gin.Context) { deleteQAConversation(c, pool) })
+	r.POST("/api/qa/conversations/:id/ask", protected, func(c *gin.Context) { c.Set("qa_conversation_id", c.Param("id")); askQuestion(c, pool, cfg) })
+	r.POST("/api/search", protected, func(c *gin.Context) { searchDocuments(c, pool, cfg) })
 	r.GET("/api/profile", protected, func(c *gin.Context) { getProfile(c, pool, cfg) })
 	r.PATCH("/api/profile", protected, func(c *gin.Context) { patchProfile(c, pool, cfg) })
 	r.POST("/api/profile/avatar", protected, func(c *gin.Context) { uploadProfileAvatar(c, pool, cfg) })
@@ -516,6 +524,7 @@ func askQuestion(c *gin.Context, pool *pgxpool.Pool, cfg config.Config) {
 		Platforms       []string `json:"platforms"`
 		ConversationIDs []int64  `json:"conversation_ids"`
 		TopK            int      `json:"top_k"`
+		ConversationID  int64    `json:"conversation_id"`
 	}
 	if c.ShouldBindJSON(&input) != nil || strings.TrimSpace(input.Question) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "question is required"})
@@ -530,7 +539,26 @@ func askQuestion(c *gin.Context, pool *pgxpool.Pool, cfg config.Config) {
 	if input.TopK < 1 || input.TopK > 10 {
 		input.TopK = 8
 	}
+	if input.ConversationID == 0 {
+		if raw, ok := c.Get("qa_conversation_id"); ok {
+			input.ConversationID, _ = strconv.ParseInt(fmt.Sprint(raw), 10, 64)
+		}
+	}
 	userID := c.GetInt64("user_id")
+	var qaMessageID int64
+	if input.ConversationID > 0 {
+		var title string
+		if err := pool.QueryRow(c, `SELECT title FROM qa_conversations WHERE id=$1 AND user_id=$2`, input.ConversationID, userID).Scan(&title); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "qa conversation not found"})
+			return
+		}
+		scopeSnapshot, _ := json.Marshal(gin.H{"platforms": input.Platforms, "conversation_ids": input.ConversationIDs})
+		if err := pool.QueryRow(c, `INSERT INTO qa_messages(conversation_id,user_id,question,scope_snapshot,request_id) VALUES($1,$2,$3,$4,$5) RETURNING id`, input.ConversationID, userID, input.Question, scopeSnapshot, fmt.Sprint(time.Now().UnixNano())).Scan(&qaMessageID); err != nil {
+			c.JSON(500, gin.H{"error": "failed to save qa question"})
+			return
+		}
+		_, _ = pool.Exec(c, `UPDATE qa_conversations SET title=CASE WHEN message_count=0 AND title='新的对话' THEN LEFT($1,30) ELSE title END, message_count=message_count+1, last_message_at=now(), updated_at=now() WHERE id=$2 AND user_id=$3`, input.Question, input.ConversationID, userID)
+	}
 	rows, err := pool.Query(c, `SELECT sa.id, sa.platform, COALESCE(b.selected_conversations,'[]'::jsonb)
         FROM ingestion.source_accounts sa LEFT JOIN ingestion.collector_bindings b
           ON b.source_account_id=sa.id AND b.collector_type=sa.platform AND b.enabled=true
@@ -612,6 +640,9 @@ func askQuestion(c *gin.Context, pool *pgxpool.Pool, cfg config.Config) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		if qaMessageID > 0 {
+			_, _ = pool.Exec(c, `UPDATE qa_messages SET answer_status='failed',error_message=$1,completed_at=now() WHERE id=$2`, "rag service unavailable", qaMessageID)
+		}
 		c.JSON(http.StatusBadGateway, gin.H{"error": "rag service unavailable"})
 		return
 	}
@@ -619,7 +650,53 @@ func askQuestion(c *gin.Context, pool *pgxpool.Pool, cfg config.Config) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Status(resp.StatusCode)
-	io.Copy(c.Writer, resp.Body)
+	var captured bytes.Buffer
+	_, _ = io.Copy(c.Writer, io.TeeReader(resp.Body, &captured))
+	if qaMessageID > 0 {
+		persistQAStream(c, pool, qaMessageID, captured.Bytes())
+	}
+}
+
+func persistQAStream(c *gin.Context, pool *pgxpool.Pool, messageID int64, body []byte) {
+	var answer strings.Builder
+	citations := make([]map[string]any, 0)
+	var retrieval map[string]any
+	requestID := ""
+	status := "completed"
+	s := bufio.NewScanner(bytes.NewReader(body))
+	var event string
+	for s.Scan() {
+		line := s.Text()
+		if strings.HasPrefix(line, "event: ") {
+			event = strings.TrimSpace(strings.TrimPrefix(line, "event: "))
+		}
+		if strings.HasPrefix(line, "data: ") {
+			var data map[string]any
+			if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &data) == nil {
+				switch event {
+				case "meta":
+					if value, ok := data["request_id"].(string); ok {
+						requestID = value
+					}
+				case "delta":
+					if text, ok := data["text"].(string); ok {
+						answer.WriteString(text)
+					}
+				case "citation":
+					citations = append(citations, data)
+				case "done":
+					if value, ok := data["retrieval"].(map[string]any); ok {
+						retrieval = value
+					}
+				case "error":
+					status = "failed"
+				}
+			}
+		}
+	}
+	cites, _ := json.Marshal(citations)
+	meta, _ := json.Marshal(retrieval)
+	_, _ = pool.Exec(c, `UPDATE qa_messages SET answer=$1,answer_status=$2,citations=$3,retrieval_meta=$4,request_id=COALESCE(NULLIF($5,''),request_id),completed_at=now() WHERE id=$6`, answer.String(), status, cites, meta, requestID, messageID)
 }
 
 type connectorConfigInput struct {

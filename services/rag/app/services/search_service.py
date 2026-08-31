@@ -17,6 +17,13 @@ class SearchScope:
     source_account_ids: tuple[int, ...] = ()
     conversation_ids: tuple[int, ...] = ()
 
+@dataclass(frozen=True)
+class SearchFilters:
+    resource_types: tuple[str, ...] = ()
+    sender_name: str = ""
+    occurred_after: str | None = None
+    occurred_before: str | None = None
+
 
 @dataclass
 class SearchResult:
@@ -32,6 +39,12 @@ class SearchResult:
     file_name: str | None = None
     source_position: str | None = None
     source: str | None = None
+    conversation_name: str | None = None
+    sender_name: str | None = None
+    resource_type: str | None = None
+    document_title: str | None = None
+    occurred_at: str | None = None
+    highlight: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -45,12 +58,17 @@ class SearchResult:
                 return None
         def text(value: Any) -> str | None:
             return str(value) if value is not None and str(value) else None
+        highlights = hit.get("highlight") or {}
+        highlighted = next(iter(highlights.get("content", []) or []), None)
         return cls(str(source.get("chunk_id") or hit.get("_id") or ""), integer(source.get("document_id")),
                    integer(source.get("attachment_id") or source.get("file_id")),
                    text(source.get("message_id") or source.get("source_message_id")), integer(source.get("conversation_id")),
                    str(source.get("content") or ""), float(hit.get("_score") or 0.0), rank,
                    file_name=text(source.get("file_name") or metadata.get("file_name")),
-                   source_position=text(source.get("source_position")), source=text(source.get("source")), metadata=metadata)
+                   source_position=text(source.get("source_position")), source=text(source.get("source") or source.get("platform")), metadata=metadata,
+                   conversation_name=text(source.get("conversation_name")), sender_name=text(source.get("sender_name")),
+                   resource_type=text(source.get("resource_type")), document_title=text(source.get("document_title")),
+                   occurred_at=text(source.get("occurred_at")), highlight=text(highlighted))
 
 
 def scope_filter(scope: SearchScope, *, platforms: Iterable[str] = ()) -> list[dict[str, Any]]:
@@ -124,25 +142,43 @@ class HybridSearch:
             self.reranker = RerankClient().rerank
         self.stats: dict[str, int] = {"keyword_hits": 0, "vector_hits": 0, "fused_hits": 0, "reranked_hits": 0}
 
-    def _bm25(self, query: str, scope: SearchScope, top_k: int, platforms: Iterable[str]) -> list[SearchResult]:
-        body = {"size": top_k, "query": {"bool": {"filter": scope_filter(scope, platforms=platforms), "must": {
-            "multi_match": {"query": query, "fields": ["content^3", "document_title^2", "file_name^2", "conversation_name"]}}}}}
+    def _bm25(self, query: str, scope: SearchScope, top_k: int, platforms: Iterable[str], filters: SearchFilters | None = None) -> list[SearchResult]:
+        clauses = scope_filter(scope, platforms=platforms)
+        filters = filters or SearchFilters()
+        if filters.resource_types: clauses.append({"terms": {"resource_type": list(filters.resource_types)}})
+        if filters.sender_name: clauses.append({"match": {"sender_name": filters.sender_name}})
+        if filters.occurred_after or filters.occurred_before:
+            rng = {}
+            if filters.occurred_after: rng["gte"] = filters.occurred_after
+            if filters.occurred_before: rng["lte"] = filters.occurred_before
+            clauses.append({"range": {"occurred_at": rng}})
+        body = {"size": top_k, "query": {"bool": {"filter": clauses, "must": {
+            "multi_match": {"query": query, "fields": ["content^3", "document_title^2", "file_name^2", "conversation_name^2", "sender_name"]}},
+            "should": [{"match_phrase": {"content": {"query": query, "boost": 2}}}] }},
+            "highlight": {"fields": {"content": {}, "document_title": {}, "file_name": {}, "conversation_name": {}, "sender_name": {}}}}
         return [SearchResult.from_hit(h, i) for i, h in enumerate(self.es.search(index=settings.elasticsearch_index, body=body)["hits"]["hits"], 1)]
 
-    def _knn(self, vector: list[float], scope: SearchScope, top_k: int, platforms: Iterable[str]) -> list[SearchResult]:
+    def _knn(self, vector: list[float], scope: SearchScope, top_k: int, platforms: Iterable[str], filters: SearchFilters | None = None) -> list[SearchResult]:
+        clauses = scope_filter(scope, platforms=platforms); filters = filters or SearchFilters()
+        if filters.resource_types: clauses.append({"terms": {"resource_type": list(filters.resource_types)}})
+        if filters.occurred_after or filters.occurred_before:
+            rng = {}
+            if filters.occurred_after: rng["gte"] = filters.occurred_after
+            if filters.occurred_before: rng["lte"] = filters.occurred_before
+            clauses.append({"range": {"occurred_at": rng}})
         body = {"knn": {"field": "embedding", "query_vector": vector, "k": top_k, "num_candidates": max(top_k * 2, 100),
-                         "filter": {"bool": {"filter": scope_filter(scope, platforms=platforms)}}}, "size": top_k}
+                         "filter": {"bool": {"filter": clauses}}}, "size": top_k}
         return [SearchResult.from_hit(h, i) for i, h in enumerate(self.es.search(index=settings.elasticsearch_index, body=body)["hits"]["hits"], 1)]
 
-    def search(self, query: str, scope: SearchScope, *, top_k: int = 8, platforms: Iterable[str] = (), rewrites: Iterable[str] = ()) -> list[SearchResult]:
+    def search(self, query: str, scope: SearchScope, *, top_k: int = 8, platforms: Iterable[str] = (), rewrites: Iterable[str] = (), filters: SearchFilters | None = None) -> list[SearchResult]:
         started = time.perf_counter()
         keyword: list[SearchResult] = []; vector: list[SearchResult] = []
         for text in list(dict.fromkeys([query, *rewrites]))[:4]:
-            keyword_hits = self._bm25(text, scope, 100, platforms)
+            keyword_hits = self._bm25(text, scope, 100, platforms, filters)
             keyword.extend(keyword_hits)
             self.stats["keyword_hits"] += len(keyword_hits)
             try:
-                vector_hits = self._knn(self.embedder.embed([text])[0], scope, 100, platforms)
+                vector_hits = self._knn(self.embedder.embed([text])[0], scope, 100, platforms, filters)
                 vector.extend(vector_hits)
                 self.stats["vector_hits"] += len(vector_hits)
             except Exception: pass

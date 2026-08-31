@@ -5,7 +5,7 @@ from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.services.search_service import AnswerGenerator, HybridSearch, QueryRewriter, SearchScope, search as run_search
+from app.services.search_service import AnswerGenerator, HybridSearch, QueryRewriter, SearchFilters, SearchScope, search as run_search
 from app.config import settings
 from app.services.pgvector_store import PgVectorStore
 
@@ -33,6 +33,17 @@ class AskRequest(BaseModel):
     conversation_ids: list[int] | None = None
     top_k: int = Field(default=8, ge=1, le=10)
     query_rewrites: list[str] = Field(default_factory=list, max_length=3)
+
+class SearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=4000)
+    scope: ScopeBody
+    platforms: list[str] = Field(default_factory=list)
+    resource_types: list[str] = Field(default_factory=list)
+    sender_name: str = Field(default="", max_length=200)
+    occurred_after: str | None = None
+    occurred_before: str | None = None
+    page: int = Field(default=1, ge=1, le=10000)
+    page_size: int = Field(default=20, ge=1, le=100)
 
 
 def _event(name: str, payload: dict) -> str:
@@ -89,3 +100,24 @@ def ask(request: AskRequest) -> StreamingResponse:
         yield _event("done", {"citations": citations, "retrieval": engine.stats})
 
     return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Request-ID": request_id})
+
+
+@router.post("")
+def search_post(request: SearchRequest) -> dict[str, object]:
+    """Authenticated search-bar protocol; QA remains on the separate SSE route."""
+    scope = SearchScope(request.scope.user_id, tuple(request.scope.source_account_ids), tuple(request.scope.conversation_ids))
+    engine = HybridSearch()
+    filters = SearchFilters(tuple(request.resource_types), request.sender_name.strip(), request.occurred_after, request.occurred_before)
+    results = engine.search(request.query.strip(), scope, top_k=min(100, request.page * request.page_size), platforms=request.platforms, filters=filters)
+    start = (request.page - 1) * request.page_size
+    page_items = results[start:start + request.page_size]
+    items = []
+    for item in page_items:
+        kind = "file" if item.attachment_id or item.file_name else ("chat" if item.message_id is None else "message")
+        items.append({"id": item.chunk_id, "kind": kind, "title": item.file_name or item.conversation_name or item.document_title or item.sender_name or "消息",
+                      "subtitle": item.content[:240], "content": item.content, "platform": item.source, "source": item.source,
+                      "conversation_id": item.conversation_id, "conversation_name": item.conversation_name, "message_id": item.message_id,
+                      "document_id": item.document_id, "attachment_id": item.attachment_id, "sender_name": item.sender_name,
+                      "occurred_at": item.occurred_at, "score": item.rerank_score if item.rerank_score is not None else item.score,
+                      "highlight": item.highlight or item.content[:240]})
+    return {"query": request.query, "items": items, "total": len(results), "page": request.page, "page_size": request.page_size, "has_more": start + request.page_size < len(results), "stats": engine.stats}

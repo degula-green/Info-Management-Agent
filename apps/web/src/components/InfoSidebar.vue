@@ -80,6 +80,7 @@
           >
             <t-icon name="chat" />
             <span>{{ session.question }}</span>
+            <span class="sidebar-history__actions"><button type="button" title="重命名" @click.stop="emit('qa-rename', session.id)"><t-icon name="edit-1" /></button><button type="button" title="删除" @click.stop="emit('qa-delete', session.id)"><t-icon name="delete" /></button></span>
           </button>
           <p v-if="!qaSessions.length" class="sidebar-history__empty">暂无历史对话</p>
         </div>
@@ -127,6 +128,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   (event: 'navigate', view: string): void
   (event: 'qa', id: string): void
+  (event: 'qa-rename', id: string): void
+  (event: 'qa-delete', id: string): void
   (event: 'collapsed-change', value: boolean): void
   (event: 'menu-action', key: 'profile' | 'terms' | 'privacy' | 'logout'): void
 }>()
@@ -469,6 +472,11 @@ const navItems = [
   font-size: 11px;
   font-weight: 600;
 }
+.sidebar-history__actions { display: none; flex: 0 0 auto; gap: 2px; }
+.sidebar-history__item:hover .sidebar-history__actions { display: inline-flex; }
+.sidebar-history__actions button { display: inline-grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; color: var(--td-text-color-placeholder); background: transparent; cursor: pointer; }
+.sidebar-history__actions button:hover { color: var(--td-text-color-primary); background: var(--td-bg-color-container-hover); }
+.sidebar-history__actions svg { width: 13px; height: 13px; }
 .sidebar-user__avatar img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
 
 .info-sidebar--collapsed .sidebar-user__avatar {

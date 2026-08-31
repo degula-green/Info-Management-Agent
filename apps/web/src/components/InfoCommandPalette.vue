@@ -57,6 +57,10 @@
           </ResultGroup>
         </template>
 
+        <template v-else-if="loading">
+          <div class="cmdk__empty"><t-icon name="loading" size="32px" /><p>正在搜索…</p><span>正在查询个人微信知识库，请稍候</span></div>
+        </template>
+
         <template v-else-if="results.length">
           <div class="cmdk__tabs" role="tablist" aria-label="搜索结果类型">
             <button
@@ -168,7 +172,7 @@ import type { SearchResult } from '../mock'
 
 type SearchTab = 'knowledge' | 'history'
 
-const props = defineProps<{ visible: boolean; query: string; results: SearchResult[]; recentSearches?: string[] }>()
+const props = defineProps<{ visible: boolean; query: string; results: SearchResult[]; recentSearches?: string[]; loading?: boolean }>()
 const emit = defineEmits<{
   (event: 'update:visible', value: boolean): void
   (event: 'search', query: string, committed?: boolean): void
