@@ -99,8 +99,12 @@ export const useInfoMockStore = defineStore('infoMock', () => {
     recentSearches.value = [value, ...recentSearches.value.filter((item) => item !== value)].slice(0, 8)
   }
 
+  function setQaSessions(next: typeof initial.qaSessions) {
+    qaSessions.value = next
+  }
+
   function getMessage(chatId?: string, messageId?: string): InfoMessage | undefined { return findChat(chatId)?.messages.find((item) => item.id === messageId) }
   function getFile(chatId?: string, fileId?: string): InfoFile | undefined { return findChat(chatId)?.files.find((item) => item.id === fileId) }
 
-  return { isAuthenticated, profile, sources, qaSessions, recentSearches, allChats, boundSources, collectingChats, totalMessages, totalFiles, login, logout, findSource, findChat, bindSource, unbindSource, updateProfile, setCollection, accessSession, updateMessage, updateFile, addRecentSearch, getMessage, getFile }
+  return { isAuthenticated, profile, sources, qaSessions, recentSearches, allChats, boundSources, collectingChats, totalMessages, totalFiles, login, logout, findSource, findChat, bindSource, unbindSource, updateProfile, setCollection, accessSession, updateMessage, updateFile, addRecentSearch, setQaSessions, getMessage, getFile }
 })

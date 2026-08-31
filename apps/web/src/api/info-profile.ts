@@ -38,4 +38,4 @@ export const getConnectors = async () => (await get<{ connectors: Connector[] }>
 export const getFeishuAuthorizeURL = async (intent: 'bind' | 'rebind') => (await post<{ authorize_url: string }>('/api/connectors/feishu/authorize', { intent })).authorize_url
 export const bindWechat = (body: { wxid: string; db_dir: string }, rebind = false) =>
   post<Connector>(`/api/connectors/wechat/${rebind ? 'rebind' : 'bind'}`, body)
-export const unbindConnector = (platform: Exclude<ConnectorPlatform, 'wecom'>) => del<Connector>(`/api/connectors/${platform}`)
+export const unbindConnector = (platform: ConnectorPlatform) => del<Connector>(`/api/connectors/${platform}`)

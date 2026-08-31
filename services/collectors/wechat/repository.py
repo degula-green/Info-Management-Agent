@@ -74,6 +74,11 @@ class WeChatRepository:
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 UNIQUE (source_account_id, collector_type))""")
             conn.execute("ALTER TABLE ingestion.collector_bindings DROP CONSTRAINT IF EXISTS collector_bindings_collector_type_key")
+            conn.execute("""UPDATE ingestion.collector_bindings b SET collector_type='wechat',updated_at=now()
+                WHERE b.collector_type='personal_wechat' AND NOT EXISTS (
+                  SELECT 1 FROM ingestion.collector_bindings existing
+                  WHERE existing.id<>b.id AND existing.source_account_id=b.source_account_id
+                    AND existing.collector_type='wechat')""")
             conn.execute("ALTER TABLE ingestion.collector_bindings DROP CONSTRAINT IF EXISTS collector_bindings_collector_type_check")
             conn.execute("ALTER TABLE ingestion.collector_bindings ADD CONSTRAINT collector_bindings_collector_type_check CHECK (collector_type IN ('wechat','feishu'))")
             conn.execute("""ALTER TABLE ingestion.collector_bindings

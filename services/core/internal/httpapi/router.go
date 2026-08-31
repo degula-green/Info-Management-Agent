@@ -1,11 +1,11 @@
 package httpapi
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -56,6 +56,50 @@ func conversationName(raw []byte, fallback string) string {
 	return fallback
 }
 
+func conversationMemberCount(raw []byte, fallback int) int {
+	if len(raw) == 0 {
+		return fallback
+	}
+	var value map[string]any
+	if json.Unmarshal(raw, &value) != nil {
+		return fallback
+	}
+	for _, key := range []string{"member_count", "members_count", "chat_member_count", "participant_count", "user_count", "member_num"} {
+		v, ok := value[key]
+		if !ok {
+			continue
+		}
+		switch n := v.(type) {
+		case float64:
+			if n > 0 {
+				return int(n)
+			}
+		case float32:
+			if n > 0 {
+				return int(n)
+			}
+		case int:
+			if n > 0 {
+				return n
+			}
+		case int64:
+			if n > 0 {
+				return int(n)
+			}
+		case json.Number:
+			if parsed, err := n.Int64(); err == nil && parsed > 0 {
+				return int(parsed)
+			}
+		case string:
+			var parsed int
+			if _, err := fmt.Sscan(strings.TrimSpace(n), &parsed); err == nil && parsed > 0 {
+				return parsed
+			}
+		}
+	}
+	return fallback
+}
+
 func NewRouter(pool *pgxpool.Pool, cfg config.Config, redisClient *redisstore.Client) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
@@ -65,14 +109,6 @@ func NewRouter(pool *pgxpool.Pool, cfg config.Config, redisClient *redisstore.Cl
 	r.GET("/health", func(c *gin.Context) { health(c, pool) })
 	r.GET("/api/info", info)
 	protected := authRequired(cfg)
-	r.POST("/api/qa/ask", protected, func(c *gin.Context) { askQuestion(c, pool, cfg) })
-	r.POST("/api/qa/conversations", protected, func(c *gin.Context) { createQAConversation(c, pool) })
-	r.GET("/api/qa/conversations", protected, func(c *gin.Context) { listQAConversations(c, pool) })
-	r.GET("/api/qa/conversations/:id", protected, func(c *gin.Context) { getQAConversation(c, pool) })
-	r.PATCH("/api/qa/conversations/:id", protected, func(c *gin.Context) { updateQAConversation(c, pool) })
-	r.DELETE("/api/qa/conversations/:id", protected, func(c *gin.Context) { deleteQAConversation(c, pool) })
-	r.POST("/api/qa/conversations/:id/ask", protected, func(c *gin.Context) { c.Set("qa_conversation_id", c.Param("id")); askQuestion(c, pool, cfg) })
-	r.POST("/api/search", protected, func(c *gin.Context) { searchDocuments(c, pool, cfg) })
 	r.GET("/api/profile", protected, func(c *gin.Context) { getProfile(c, pool, cfg) })
 	r.PATCH("/api/profile", protected, func(c *gin.Context) { patchProfile(c, pool, cfg) })
 	r.POST("/api/profile/avatar", protected, func(c *gin.Context) { uploadProfileAvatar(c, pool, cfg) })
@@ -82,14 +118,26 @@ func NewRouter(pool *pgxpool.Pool, cfg config.Config, redisClient *redisstore.Cl
 	r.GET("/api/connectors/feishu/callback", func(c *gin.Context) { feishuCallback(c, pool, redisClient, cfg) })
 	r.POST("/api/connectors/wechat/bind", protected, func(c *gin.Context) { proxyWechatConnector(c, cfg, "/bind") })
 	r.POST("/api/connectors/wechat/rebind", protected, func(c *gin.Context) { proxyWechatConnector(c, cfg, "/rebind") })
+	// Compatibility routes for clients that still send the temporary value.
+	r.POST("/api/connectors/personal_wechat/bind", protected, func(c *gin.Context) { proxyWechatConnector(c, cfg, "/bind") })
+	r.POST("/api/connectors/personal_wechat/rebind", protected, func(c *gin.Context) { proxyWechatConnector(c, cfg, "/rebind") })
 	r.DELETE("/api/connectors/:platform", protected, func(c *gin.Context) { unbindConnector(c, pool, cfg, redisClient) })
 	r.GET("/api/tasks", protected, func(c *gin.Context) { listTasks(c, pool) })
 	r.GET("/api/tasks/:id", protected, func(c *gin.Context) { getTask(c, pool) })
 	r.POST("/api/tasks/:id/retry", protected, func(c *gin.Context) { retryTask(c, pool) })
 	r.GET("/api/workers", protected, func(c *gin.Context) { listWorkers(c, pool) })
 	r.GET("/api/messages", protected, func(c *gin.Context) { listMessages(c, pool) })
+	r.POST("/api/search", protected, func(c *gin.Context) { searchDocuments(c, pool, cfg) })
+	r.POST("/api/qa/ask", protected, func(c *gin.Context) { askQuestion(c, pool, cfg) })
+	r.POST("/api/qa/conversations", protected, func(c *gin.Context) { createQAConversation(c, pool) })
+	r.GET("/api/qa/conversations", protected, func(c *gin.Context) { listQAConversations(c, pool) })
+	r.GET("/api/qa/conversations/:id", protected, func(c *gin.Context) { getQAConversation(c, pool) })
+	r.PATCH("/api/qa/conversations/:id", protected, func(c *gin.Context) { updateQAConversation(c, pool) })
+	r.DELETE("/api/qa/conversations/:id", protected, func(c *gin.Context) { deleteQAConversation(c, pool) })
+	r.POST("/api/qa/conversations/:id/ask", protected, func(c *gin.Context) { c.Set("qa_conversation_id", c.Param("id")); askQuestion(c, pool, cfg) })
 	r.GET("/api/messages/:id/attachments", protected, func(c *gin.Context) { listMessageAttachments(c, pool) })
 	r.GET("/api/attachments/:id", protected, func(c *gin.Context) { getAttachment(c, pool) })
+	r.GET("/api/attachments/:id/content", protected, func(c *gin.Context) { getAttachmentContent(c, pool, cfg) })
 	r.GET("/api/knowledge-bases", protected, func(c *gin.Context) { listKnowledgeBases(c, pool) })
 	r.GET("/api/knowledge-bases/:platform/conversations", protected, func(c *gin.Context) { listKnowledgeConversations(c, pool) })
 	r.GET("/api/knowledge-bases/:platform/conversations/:id", protected, func(c *gin.Context) { getKnowledgeConversation(c, pool) })
@@ -106,6 +154,18 @@ func NewRouter(pool *pgxpool.Pool, cfg config.Config, redisClient *redisstore.Cl
 	})
 	r.GET("/api/ingestion/wechat/config", protected, func(c *gin.Context) { connectorConfig(c, pool, "wechat", false) })
 	r.PUT("/api/ingestion/wechat/config", protected, func(c *gin.Context) { updateConnectorConfig(c, pool, cfg, "wechat") })
+	// Compatibility routes for clients that still send the temporary value.
+	r.GET("/api/ingestion/personal_wechat/status", protected, func(c *gin.Context) { proxyWechat(c, cfg, "/status") })
+	r.GET("/api/ingestion/personal_wechat/conversations", protected, func(c *gin.Context) {
+		path := "/conversations"
+		if c.Request.URL.RawQuery != "" {
+			path += "?" + c.Request.URL.RawQuery
+		}
+		proxyWechat(c, cfg, path)
+	})
+	r.GET("/api/ingestion/personal_wechat/config", protected, func(c *gin.Context) { connectorConfig(c, pool, "wechat", false) })
+	r.PUT("/api/ingestion/personal_wechat/config", protected, func(c *gin.Context) { updateConnectorConfig(c, pool, cfg, "wechat") })
+	r.POST("/api/ingestion/personal_wechat/stop", protected, func(c *gin.Context) { proxyWechat(c, cfg, "/stop") })
 	r.GET("/api/ingestion/feishu/conversations", protected, func(c *gin.Context) { listConnectorConversations(c, pool, "feishu") })
 	r.GET("/api/ingestion/feishu/config", protected, func(c *gin.Context) { connectorConfig(c, pool, "feishu", false) })
 	r.PUT("/api/ingestion/feishu/config", protected, func(c *gin.Context) { updateConnectorConfig(c, pool, cfg, "feishu") })
@@ -119,13 +179,23 @@ func attachmentFields() string {
 	return `a.id,a.file_name,a.extension,a.mime_type,a.file_category,a.file_size,a.parse_status,a.preview_capability,a.is_deleted`
 }
 
-func attachmentJSON(id int64, name, ext, mime, category string, size *int64, parse, preview string, deleted bool) gin.H {
-	return gin.H{"id": id, "file_name": name, "extension": ext, "mime_type": mime, "file_category": category, "file_size": size, "parse_status": parse, "preview_capability": preview, "is_deleted": deleted}
+func attachmentJSON(id int64, name, ext, mime, category string, size *int64, parse, preview string, deleted bool, documentID *int64, documentStatus *string, content string) gin.H {
+	return gin.H{"id": id, "file_name": name, "extension": ext, "mime_type": mime, "file_category": category, "file_size": size, "parse_status": parse, "preview_capability": preview, "is_deleted": deleted, "document_id": documentID, "document_status": documentStatus, "content": content}
 }
 
 func listMessageAttachments(c *gin.Context, pool *pgxpool.Pool) {
 	messageID := c.Param("id")
-	rows, err := pool.Query(c, `SELECT `+attachmentFields()+` FROM ingestion.attachments a JOIN ingestion.messages m ON m.id=a.message_id JOIN ingestion.source_accounts sa ON sa.id=m.source_account_id WHERE a.message_id=$1 AND sa.internal_account_id=$2 ORDER BY a.id`, messageID, c.GetInt64("user_id"))
+	rows, err := pool.Query(c, `SELECT `+attachmentFields()+`, doc.id,COALESCE(doc.status,''),COALESCE(doc.content,'')
+        FROM ingestion.attachments a
+        JOIN ingestion.messages m ON m.id=a.message_id
+        JOIN ingestion.source_accounts sa ON sa.id=m.source_account_id
+        LEFT JOIN LATERAL (
+            SELECT d.id,d.status,d.content
+            FROM vector_store.documents d
+            WHERE d.attachment_id=a.id AND d.document_type='attachment'
+            ORDER BY d.updated_at DESC LIMIT 1
+        ) doc ON true
+        WHERE a.message_id=$1 AND sa.internal_account_id=$2 ORDER BY a.id`, messageID, c.GetInt64("user_id"))
 	if err != nil {
 		c.JSON(500, gin.H{"error": "failed to list attachments"})
 		return
@@ -137,8 +207,20 @@ func listMessageAttachments(c *gin.Context, pool *pgxpool.Pool) {
 		var name, ext, mime, cat, parse, preview string
 		var size *int64
 		var deleted bool
-		if rows.Scan(&id, &name, &ext, &mime, &cat, &size, &parse, &preview, &deleted) == nil {
-			out = append(out, attachmentJSON(id, name, ext, mime, cat, size, parse, preview, deleted))
+		var documentID sql.NullInt64
+		var documentStatus, content string
+		if rows.Scan(&id, &name, &ext, &mime, &cat, &size, &parse, &preview, &deleted, &documentID, &documentStatus, &content) == nil {
+			var docID *int64
+			if documentID.Valid {
+				value := documentID.Int64
+				docID = &value
+			}
+			var docStatus *string
+			if strings.TrimSpace(documentStatus) != "" {
+				value := documentStatus
+				docStatus = &value
+			}
+			out = append(out, attachmentJSON(id, name, ext, mime, cat, size, parse, preview, deleted, docID, docStatus, content))
 		}
 	}
 	c.JSON(200, gin.H{"attachments": out})
@@ -153,12 +235,33 @@ func getAttachment(c *gin.Context, pool *pgxpool.Pool) {
 	var name, ext, mime, cat, parse, preview string
 	var size *int64
 	var deleted bool
-	err := pool.QueryRow(c, `SELECT `+attachmentFields()+` FROM ingestion.attachments a JOIN ingestion.source_accounts sa ON sa.id=a.source_account_id WHERE a.id=$1 AND sa.internal_account_id=$2`, id, c.GetInt64("user_id")).Scan(&id, &name, &ext, &mime, &cat, &size, &parse, &preview, &deleted)
+	var documentID sql.NullInt64
+	var documentStatus, content string
+	err := pool.QueryRow(c, `SELECT `+attachmentFields()+`, doc.id,COALESCE(doc.status,''),COALESCE(doc.content,'')
+        FROM ingestion.attachments a
+        JOIN ingestion.source_accounts sa ON sa.id=a.source_account_id
+        LEFT JOIN LATERAL (
+            SELECT d.id,d.status,d.content
+            FROM vector_store.documents d
+            WHERE d.attachment_id=a.id AND d.document_type='attachment'
+            ORDER BY d.updated_at DESC LIMIT 1
+        ) doc ON true
+        WHERE a.id=$1 AND sa.internal_account_id=$2`, id, c.GetInt64("user_id")).Scan(&id, &name, &ext, &mime, &cat, &size, &parse, &preview, &deleted, &documentID, &documentStatus, &content)
 	if err != nil {
 		c.JSON(404, gin.H{"error": "attachment not found"})
 		return
 	}
-	c.JSON(200, attachmentJSON(id, name, ext, mime, cat, size, parse, preview, deleted))
+	var docID *int64
+	if documentID.Valid {
+		value := documentID.Int64
+		docID = &value
+	}
+	var docStatus *string
+	if strings.TrimSpace(documentStatus) != "" {
+		value := documentStatus
+		docStatus = &value
+	}
+	c.JSON(200, attachmentJSON(id, name, ext, mime, cat, size, parse, preview, deleted, docID, docStatus, content))
 }
 
 // listKnowledgeBases exposes the fixed platform-level knowledge bases. A
@@ -183,6 +286,7 @@ func listKnowledgeBases(c *gin.Context, pool *pgxpool.Pool) {
 	result := make([]knowledgeBase, 0, len(platforms))
 	userID := c.GetInt64("user_id")
 	for _, platform := range platforms {
+		storagePlatforms := platformStorageValues(platform.key)
 		var item knowledgeBase
 		item.Platform, item.DisplayName = platform.key, platform.name
 		var accountID *int64
@@ -191,9 +295,15 @@ func listKnowledgeBases(c *gin.Context, pool *pgxpool.Pool) {
 		err := pool.QueryRow(c, `SELECT sa.id, (b.enabled AND jsonb_array_length(COALESCE(b.selected_conversations,'[]'::jsonb)) > 0),
                 jsonb_array_length(COALESCE(b.selected_conversations,'[]'::jsonb)), sa.last_collected_at
             FROM ingestion.source_accounts sa
-            LEFT JOIN ingestion.collector_bindings b ON b.source_account_id=sa.id AND b.collector_type=$2
-            WHERE sa.internal_account_id=$1 AND sa.platform=$2 AND sa.status='active'
-            ORDER BY sa.updated_at DESC NULLS LAST, sa.id DESC LIMIT 1`, userID, platform.key).
+            LEFT JOIN LATERAL (
+                SELECT enabled,selected_conversations
+                FROM ingestion.collector_bindings b
+                WHERE b.source_account_id=sa.id AND b.collector_type=ANY($2::text[])
+                ORDER BY CASE WHEN b.collector_type=$3 THEN 0 ELSE 1 END
+                LIMIT 1
+            ) b ON true
+            WHERE sa.internal_account_id=$1 AND sa.platform=ANY($2::text[]) AND sa.status='active'
+            ORDER BY CASE WHEN sa.platform=$3 THEN 0 ELSE 1 END, sa.updated_at DESC NULLS LAST, sa.id DESC LIMIT 1`, userID, storagePlatforms, platform.key).
 			Scan(&accountID, &enabled, &selected, &item.LastSyncAt)
 		if err == nil && accountID != nil {
 			item.Bound = true
@@ -208,7 +318,7 @@ func listKnowledgeBases(c *gin.Context, pool *pgxpool.Pool) {
 }
 
 func knowledgePlatform(value string) bool {
-	return value == "feishu" || value == "wecom" || value == "wechat"
+	return canonicalPlatform(value) != ""
 }
 
 func knowledgeConversationID(c *gin.Context) (int64, bool) {
@@ -221,11 +331,12 @@ func knowledgeConversationID(c *gin.Context) (int64, bool) {
 }
 
 func listKnowledgeConversations(c *gin.Context, pool *pgxpool.Pool) {
-	platform := c.Param("platform")
+	platform := canonicalPlatform(c.Param("platform"))
 	if !knowledgePlatform(platform) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "knowledge base not found"})
 		return
 	}
+	storagePlatforms := platformStorageValues(platform)
 	accountID, ok := connectorAccountID(c, pool, platform)
 	if !ok {
 		c.JSON(http.StatusForbidden, gin.H{"error": "knowledge base is not bound"})
@@ -244,15 +355,17 @@ func listKnowledgeConversations(c *gin.Context, pool *pgxpool.Pool) {
 	search, typ := strings.ToLower(strings.TrimSpace(c.Query("search"))), strings.TrimSpace(c.Query("type"))
 	pattern := "%" + search + "%"
 	rows, err := pool.Query(c, `SELECT c.id,c.external_conversation_id,COALESCE(c.name,''),c.conversation_type,
-            c.last_seen_at,c.is_active,
-            EXISTS(SELECT 1 FROM ingestion.collector_bindings b WHERE b.source_account_id=$1 AND b.collector_type=$2
-                   AND b.selected_conversations ? c.external_conversation_id)
+            c.last_seen_at,c.is_active,c.raw_payload,
+            EXISTS(SELECT 1 FROM ingestion.collector_bindings b WHERE b.source_account_id=$1 AND b.collector_type=ANY($2::text[])
+                   AND b.selected_conversations ? c.external_conversation_id),
+            COALESCE((SELECT count(*) FROM ingestion.messages m WHERE m.source_account_id=c.source_account_id AND m.conversation_id=c.id),0),
+            COALESCE((SELECT count(*) FROM ingestion.attachments a JOIN ingestion.messages m ON m.id=a.message_id WHERE m.source_account_id=c.source_account_id AND m.conversation_id=c.id AND a.is_deleted=false),0)
         FROM ingestion.conversations c
-        WHERE c.source_account_id=$1 AND c.platform=$2
+        WHERE c.source_account_id=$1 AND c.platform=ANY($2::text[])
           AND ($3='' OR lower(c.external_conversation_id||' '||COALESCE(c.name,'')) LIKE $4)
           AND ($5='' OR c.conversation_type=$5)
         ORDER BY c.last_seen_at DESC NULLS LAST,c.id DESC LIMIT $6 OFFSET $7`,
-		accountID, platform, search, pattern, typ, size, (page-1)*size)
+		accountID, storagePlatforms, search, pattern, typ, size, (page-1)*size)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list conversations"})
 		return
@@ -263,24 +376,35 @@ func listKnowledgeConversations(c *gin.Context, pool *pgxpool.Pool) {
 		var id int64
 		var externalID, name, kind string
 		var seen *time.Time
+		var raw []byte
 		var active, selected bool
-		if rows.Scan(&id, &externalID, &name, &kind, &seen, &active, &selected) == nil {
-			items = append(items, gin.H{"id": id, "external_id": externalID, "name": name, "conversation_type": kind, "last_seen_at": seen, "is_active": active, "selected": selected})
+		var messageCount, attachmentCount int64
+		if err := rows.Scan(&id, &externalID, &name, &kind, &seen, &active, &raw, &selected, &messageCount, &attachmentCount); err == nil {
+			members := conversationMemberCount(raw, func() int {
+				if kind == "direct" {
+					return 2
+				}
+				return 0
+			}())
+			items = append(items, gin.H{"id": id, "external_id": externalID, "name": conversationName(raw, name), "conversation_type": kind, "last_seen_at": seen, "is_active": active, "selected": selected, "members": members, "message_count": messageCount, "attachment_count": attachmentCount})
+		} else {
+			log.Printf("list knowledge conversations: scan failed for %s: %v", externalID, err)
 		}
 	}
 	var total int
-	_ = pool.QueryRow(c, `SELECT count(*) FROM ingestion.conversations c WHERE c.source_account_id=$1 AND c.platform=$2
+	_ = pool.QueryRow(c, `SELECT count(*) FROM ingestion.conversations c WHERE c.source_account_id=$1 AND c.platform=ANY($2::text[])
         AND ($3='' OR lower(c.external_conversation_id||' '||COALESCE(c.name,'')) LIKE $4)
-        AND ($5='' OR c.conversation_type=$5)`, accountID, platform, search, pattern, typ).Scan(&total)
+        AND ($5='' OR c.conversation_type=$5)`, accountID, storagePlatforms, search, pattern, typ).Scan(&total)
 	c.JSON(http.StatusOK, gin.H{"conversations": items, "page": page, "page_size": size, "total": total})
 }
 
 func getKnowledgeConversation(c *gin.Context, pool *pgxpool.Pool) {
-	platform := c.Param("platform")
+	platform := canonicalPlatform(c.Param("platform"))
 	if !knowledgePlatform(platform) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "knowledge base not found"})
 		return
 	}
+	storagePlatforms := platformStorageValues(platform)
 	id, ok := knowledgeConversationID(c)
 	if !ok {
 		return
@@ -293,24 +417,35 @@ func getKnowledgeConversation(c *gin.Context, pool *pgxpool.Pool) {
 	var externalID, name, kind string
 	var seen *time.Time
 	var active, selected bool
-	err := pool.QueryRow(c, `SELECT c.external_conversation_id,COALESCE(c.name,''),c.conversation_type,c.last_seen_at,c.is_active,
-        EXISTS(SELECT 1 FROM ingestion.collector_bindings b WHERE b.source_account_id=c.source_account_id AND b.collector_type=$2
-               AND b.selected_conversations ? c.external_conversation_id)
-        FROM ingestion.conversations c WHERE c.id=$1 AND c.source_account_id=$3 AND c.platform=$2`, id, platform, accountID).
-		Scan(&externalID, &name, &kind, &seen, &active, &selected)
+	var raw []byte
+	var messageCount, attachmentCount int64
+	err := pool.QueryRow(c, `SELECT c.external_conversation_id,COALESCE(c.name,''),c.conversation_type,c.last_seen_at,c.is_active,c.raw_payload,
+        EXISTS(SELECT 1 FROM ingestion.collector_bindings b WHERE b.source_account_id=c.source_account_id AND b.collector_type=ANY($2::text[])
+               AND b.selected_conversations ? c.external_conversation_id),
+        COALESCE((SELECT count(*) FROM ingestion.messages m WHERE m.source_account_id=c.source_account_id AND m.conversation_id=c.id),0),
+        COALESCE((SELECT count(*) FROM ingestion.attachments a JOIN ingestion.messages m ON m.id=a.message_id WHERE m.source_account_id=c.source_account_id AND m.conversation_id=c.id AND a.is_deleted=false),0)
+        FROM ingestion.conversations c WHERE c.id=$1 AND c.source_account_id=$3 AND c.platform=ANY($2::text[])`, id, storagePlatforms, accountID).
+		Scan(&externalID, &name, &kind, &seen, &active, &raw, &selected, &messageCount, &attachmentCount)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "conversation not found"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"id": id, "external_id": externalID, "name": name, "conversation_type": kind, "last_seen_at": seen, "is_active": active, "selected": selected})
+	members := conversationMemberCount(raw, func() int {
+		if kind == "direct" {
+			return 2
+		}
+		return 0
+	}())
+	c.JSON(http.StatusOK, gin.H{"id": id, "external_id": externalID, "name": conversationName(raw, name), "conversation_type": kind, "last_seen_at": seen, "is_active": active, "selected": selected, "members": members, "message_count": messageCount, "attachment_count": attachmentCount})
 }
 
 func listKnowledgeConversationMessages(c *gin.Context, pool *pgxpool.Pool) {
-	platform := c.Param("platform")
+	platform := canonicalPlatform(c.Param("platform"))
 	if !knowledgePlatform(platform) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "knowledge base not found"})
 		return
 	}
+	storagePlatforms := platformStorageValues(platform)
 	id, ok := knowledgeConversationID(c)
 	if !ok {
 		return
@@ -331,13 +466,22 @@ func listKnowledgeConversationMessages(c *gin.Context, pool *pgxpool.Pool) {
 		offset = 0
 	}
 	rows, err := pool.Query(c, `SELECT m.id,m.source_message_id,m.sender_id,COALESCE(p.display_name,''),COALESCE(p.avatar_url,''),m.occurred_at,
-        m.message_type,m.source_message_type,m.text,m.is_deleted,m.is_updated,m.metadata,
-        COALESCE(d.status,'pending')
+		m.message_type,COALESCE(m.source_message_type,''),COALESCE(m.text,''),m.is_deleted,m.is_updated,COALESCE(m.metadata,'{}'::jsonb),
+        COALESCE(d.status,'pending'),
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('id',a.id,'file_name',a.file_name,'extension',a.extension,'mime_type',a.mime_type,'file_category',a.file_category,'file_size',a.file_size,'parse_status',a.parse_status,'preview_capability',a.preview_capability,'is_deleted',a.is_deleted,'document_id',doc.id,'document_status',COALESCE(doc.status,''),'content',COALESCE(doc.content,'')) ORDER BY a.id)
+            FROM ingestion.attachments a
+            LEFT JOIN LATERAL (
+                SELECT d.id,d.status,d.content
+                FROM vector_store.documents d
+                WHERE d.attachment_id=a.id AND d.document_type='attachment'
+                ORDER BY d.updated_at DESC LIMIT 1
+            ) doc ON true
+            WHERE a.message_id=m.id AND a.is_deleted=false),'[]'::jsonb)
         FROM ingestion.messages m
         LEFT JOIN ingestion.participants p ON p.id=m.sender_id
         LEFT JOIN LATERAL (SELECT status FROM vector_store.documents d WHERE d.raw_message_id=m.raw_message_id ORDER BY d.updated_at DESC LIMIT 1) d ON true
-        WHERE m.source_account_id=$1 AND m.conversation_id=$2 AND m.source=$3
-        ORDER BY COALESCE(m.occurred_at,m.created_at),m.id LIMIT $4 OFFSET $5`, accountID, id, platform, limit, offset)
+        WHERE m.source_account_id=$1 AND m.conversation_id=$2 AND m.source=ANY($3::text[])
+        ORDER BY COALESCE(m.occurred_at,m.created_at),m.id LIMIT $4 OFFSET $5`, accountID, id, storagePlatforms, limit, offset)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list conversation messages"})
 		return
@@ -351,12 +495,19 @@ func listKnowledgeConversationMessages(c *gin.Context, pool *pgxpool.Pool) {
 		var occurred *time.Time
 		var deleted, updated bool
 		var metadata []byte
-		if rows.Scan(&messageID, &sourceID, &senderID, &senderName, &senderAvatar, &occurred, &kind, &sourceKind, &text, &deleted, &updated, &metadata, &status) == nil {
+		var attachments []byte
+		if err := rows.Scan(&messageID, &sourceID, &senderID, &senderName, &senderAvatar, &occurred, &kind, &sourceKind, &text, &deleted, &updated, &metadata, &status, &attachments); err == nil {
 			var meta any = map[string]any{}
 			if len(metadata) > 0 {
 				_ = json.Unmarshal(metadata, &meta)
 			}
-			items = append(items, gin.H{"id": messageID, "source_message_id": sourceID, "sender_id": senderID, "sender_name": senderName, "sender_avatar_url": senderAvatar, "occurred_at": occurred, "message_type": kind, "source_message_type": sourceKind, "text": text, "is_deleted": deleted, "is_updated": updated, "metadata": meta, "vector_status": status})
+			var parsedAttachments any = []any{}
+			if len(attachments) > 0 {
+				_ = json.Unmarshal(attachments, &parsedAttachments)
+			}
+			items = append(items, gin.H{"id": messageID, "source_message_id": sourceID, "sender_id": senderID, "sender_name": senderName, "sender_avatar_url": senderAvatar, "occurred_at": occurred, "message_type": kind, "source_message_type": sourceKind, "text": text, "is_deleted": deleted, "is_updated": updated, "metadata": meta, "vector_status": status, "attachments": parsedAttachments})
+		} else {
+			log.Printf("list knowledge conversation messages: scan failed for conversation %d: %v", id, err)
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"messages": items, "limit": limit, "offset": offset})
@@ -472,8 +623,8 @@ func me(c *gin.Context, pool *pgxpool.Pool) {
 		(SELECT sa.external_account_id FROM ingestion.source_accounts sa WHERE sa.internal_account_id=u.id AND sa.platform='feishu' AND sa.status='active' ORDER BY sa.updated_at DESC NULLS LAST,sa.id DESC LIMIT 1),
 		(SELECT sa.account_name FROM ingestion.source_accounts sa WHERE sa.internal_account_id=u.id AND sa.platform='feishu' AND sa.status='active' ORDER BY sa.updated_at DESC NULLS LAST,sa.id DESC LIMIT 1),
 		CASE WHEN EXISTS (SELECT 1 FROM ingestion.source_accounts sa WHERE sa.internal_account_id=u.id AND sa.platform='feishu' AND sa.status='active') THEN u.feishu_avatar END,
-        EXISTS (SELECT 1 FROM ingestion.source_accounts sa WHERE sa.internal_account_id=u.id AND sa.platform='wechat' AND sa.status='active'),
-        (SELECT sa.external_account_id FROM ingestion.source_accounts sa WHERE sa.internal_account_id=u.id AND sa.platform='wechat' AND sa.status='active' ORDER BY sa.updated_at DESC NULLS LAST,sa.id DESC LIMIT 1)
+        EXISTS (SELECT 1 FROM ingestion.source_accounts sa WHERE sa.internal_account_id=u.id AND sa.platform IN ('wechat','personal_wechat') AND sa.status='active'),
+        (SELECT sa.external_account_id FROM ingestion.source_accounts sa WHERE sa.internal_account_id=u.id AND sa.platform IN ('wechat','personal_wechat') AND sa.status='active' ORDER BY CASE WHEN sa.platform='wechat' THEN 0 ELSE 1 END, sa.updated_at DESC NULLS LAST,sa.id DESC LIMIT 1)
 		FROM identity.users u WHERE u.id=$1`, id).Scan(&username, &email, &nick, &fo, &fn, &fa, &wechatBound, &wxid); err != nil {
 		c.JSON(404, gin.H{"error": "user not found"})
 		return
@@ -504,11 +655,7 @@ func proxyWechat(c *gin.Context, cfg config.Config, path string) {
 		req.Header.Set("X-Info-Agent-User-ID", strconv.FormatInt(userID, 10))
 	}
 	req.Header.Set("X-Info-Agent-Collector-Token", cfg.CollectorToken)
-	// Do not let an unavailable RAG service leave the browser's SSE request
-	// hanging forever. ResponseHeaderTimeout bounds connection/startup time;
-	// once streaming has started, cancellation still follows the client context.
-	ragClient := &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 15 * time.Second}}
-	resp, err := ragClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		c.JSON(503, gin.H{"error": "wechat collector unavailable"})
 		return
@@ -518,199 +665,26 @@ func proxyWechat(c *gin.Context, cfg config.Config, path string) {
 	c.Data(resp.StatusCode, "application/json", data)
 }
 
-func askQuestion(c *gin.Context, pool *pgxpool.Pool, cfg config.Config) {
-	var input struct {
-		Question        string   `json:"question"`
-		Platforms       []string `json:"platforms"`
-		ConversationIDs []int64  `json:"conversation_ids"`
-		TopK            int      `json:"top_k"`
-		ConversationID  int64    `json:"conversation_id"`
-	}
-	if c.ShouldBindJSON(&input) != nil || strings.TrimSpace(input.Question) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "question is required"})
-		return
-	}
-	if input.Platforms == nil {
-		input.Platforms = []string{}
-	}
-	if input.ConversationIDs == nil {
-		input.ConversationIDs = []int64{}
-	}
-	if input.TopK < 1 || input.TopK > 10 {
-		input.TopK = 8
-	}
-	if input.ConversationID == 0 {
-		if raw, ok := c.Get("qa_conversation_id"); ok {
-			input.ConversationID, _ = strconv.ParseInt(fmt.Sprint(raw), 10, 64)
-		}
-	}
-	userID := c.GetInt64("user_id")
-	var qaMessageID int64
-	if input.ConversationID > 0 {
-		var title string
-		if err := pool.QueryRow(c, `SELECT title FROM qa_conversations WHERE id=$1 AND user_id=$2`, input.ConversationID, userID).Scan(&title); err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "qa conversation not found"})
-			return
-		}
-		scopeSnapshot, _ := json.Marshal(gin.H{"platforms": input.Platforms, "conversation_ids": input.ConversationIDs})
-		if err := pool.QueryRow(c, `INSERT INTO qa_messages(conversation_id,user_id,question,scope_snapshot,request_id) VALUES($1,$2,$3,$4,$5) RETURNING id`, input.ConversationID, userID, input.Question, scopeSnapshot, fmt.Sprint(time.Now().UnixNano())).Scan(&qaMessageID); err != nil {
-			c.JSON(500, gin.H{"error": "failed to save qa question"})
-			return
-		}
-		_, _ = pool.Exec(c, `UPDATE qa_conversations SET title=CASE WHEN message_count=0 AND title='新的对话' THEN LEFT($1,30) ELSE title END, message_count=message_count+1, last_message_at=now(), updated_at=now() WHERE id=$2 AND user_id=$3`, input.Question, input.ConversationID, userID)
-	}
-	rows, err := pool.Query(c, `SELECT sa.id, sa.platform, COALESCE(b.selected_conversations,'[]'::jsonb)
-        FROM ingestion.source_accounts sa LEFT JOIN ingestion.collector_bindings b
-          ON b.source_account_id=sa.id AND b.collector_type=sa.platform AND b.enabled=true
-        WHERE sa.internal_account_id=$1 AND sa.status='active'`, userID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve search scope"})
-		return
-	}
-	defer rows.Close()
-	accounts := []int64{}
-	conversations := []int64{}
-	for rows.Next() {
-		var account int64
-		var platform string
-		var selected []byte
-		if rows.Scan(&account, &platform, &selected) != nil {
-			continue
-		}
-		if len(input.Platforms) > 0 {
-			allowed := false
-			for _, wanted := range input.Platforms {
-				if wanted == platform {
-					allowed = true
-					break
-				}
-			}
-			if !allowed {
-				continue
-			}
-		}
-		var externalIDs []string
-		if json.Unmarshal(selected, &externalIDs) != nil || len(externalIDs) == 0 {
-			continue
-		}
-		conversationRows, queryErr := pool.Query(c, `SELECT id FROM ingestion.conversations
-			WHERE source_account_id=$1 AND external_conversation_id = ANY($2::text[])`, account, externalIDs)
-		if queryErr != nil {
-			continue
-		}
-		accountConversationCount := 0
-		for conversationRows.Next() {
-			var id int64
-			if conversationRows.Scan(&id) == nil {
-				conversations = append(conversations, id)
-				accountConversationCount++
-			}
-		}
-		conversationRows.Close()
-		if accountConversationCount > 0 {
-			accounts = append(accounts, account)
-		}
-	}
-	if len(input.ConversationIDs) > 0 {
-		allowed := make(map[int64]struct{}, len(input.ConversationIDs))
-		for _, id := range input.ConversationIDs {
-			allowed[id] = struct{}{}
-		}
-		filtered := conversations[:0]
-		for _, id := range conversations {
-			if _, ok := allowed[id]; ok {
-				filtered = append(filtered, id)
-			}
-		}
-		conversations = filtered
-		// An explicit conversation scope that has no permitted intersection
-		// must fail closed; an empty list otherwise means "all conversations"
-		// to the RAG service.
-		if len(conversations) == 0 {
-			accounts = []int64{}
-		}
-	}
-	payload, _ := json.Marshal(gin.H{"question": input.Question, "platforms": input.Platforms, "top_k": input.TopK,
-		"scope": gin.H{"user_id": userID, "source_account_ids": accounts, "conversation_ids": conversations}})
-	req, err := http.NewRequestWithContext(c, http.MethodPost, strings.TrimRight(cfg.RAGServiceURL, "/")+"/qa/ask", bytes.NewReader(payload))
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "rag request failed"})
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		if qaMessageID > 0 {
-			_, _ = pool.Exec(c, `UPDATE qa_messages SET answer_status='failed',error_message=$1,completed_at=now() WHERE id=$2`, "rag service unavailable", qaMessageID)
-		}
-		c.JSON(http.StatusBadGateway, gin.H{"error": "rag service unavailable"})
-		return
-	}
-	defer resp.Body.Close()
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Status(resp.StatusCode)
-	var captured bytes.Buffer
-	_, _ = io.Copy(c.Writer, io.TeeReader(resp.Body, &captured))
-	if qaMessageID > 0 {
-		persistQAStream(c, pool, qaMessageID, captured.Bytes())
-	}
-}
-
-func persistQAStream(c *gin.Context, pool *pgxpool.Pool, messageID int64, body []byte) {
-	var answer strings.Builder
-	citations := make([]map[string]any, 0)
-	var retrieval map[string]any
-	requestID := ""
-	status := "completed"
-	s := bufio.NewScanner(bytes.NewReader(body))
-	var event string
-	for s.Scan() {
-		line := s.Text()
-		if strings.HasPrefix(line, "event: ") {
-			event = strings.TrimSpace(strings.TrimPrefix(line, "event: "))
-		}
-		if strings.HasPrefix(line, "data: ") {
-			var data map[string]any
-			if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &data) == nil {
-				switch event {
-				case "meta":
-					if value, ok := data["request_id"].(string); ok {
-						requestID = value
-					}
-				case "delta":
-					if text, ok := data["text"].(string); ok {
-						answer.WriteString(text)
-					}
-				case "citation":
-					citations = append(citations, data)
-				case "done":
-					if value, ok := data["retrieval"].(map[string]any); ok {
-						retrieval = value
-					}
-				case "error":
-					status = "failed"
-				}
-			}
-		}
-	}
-	cites, _ := json.Marshal(citations)
-	meta, _ := json.Marshal(retrieval)
-	_, _ = pool.Exec(c, `UPDATE qa_messages SET answer=$1,answer_status=$2,citations=$3,retrieval_meta=$4,request_id=COALESCE(NULLIF($5,''),request_id),completed_at=now() WHERE id=$6`, answer.String(), status, cites, meta, requestID, messageID)
-}
-
 type connectorConfigInput struct {
 	SelectedConversations []string   `json:"selected_conversations"`
 	HistoryStartAt        *time.Time `json:"history_start_at"`
+	Enabled               *bool      `json:"enabled"`
 }
 
 func connectorAccountID(c *gin.Context, pool *pgxpool.Pool, platform string) (int64, bool) {
+	platform = canonicalPlatform(platform)
+	storagePlatforms := platformStorageValues(platform)
+	if len(storagePlatforms) == 0 {
+		return 0, false
+	}
 	var id int64
-	err := pool.QueryRow(c, `SELECT id FROM ingestion.source_accounts WHERE internal_account_id=$1 AND platform=$2 AND status='active' ORDER BY updated_at DESC NULLS LAST,id DESC LIMIT 1`, c.GetInt64("user_id"), platform).Scan(&id)
+	err := pool.QueryRow(c, `SELECT id FROM ingestion.source_accounts WHERE internal_account_id=$1 AND platform=ANY($2::text[]) AND status='active' ORDER BY CASE WHEN platform=$3 THEN 0 ELSE 1 END, updated_at DESC NULLS LAST,id DESC LIMIT 1`, c.GetInt64("user_id"), storagePlatforms, platform).Scan(&id)
 	return id, err == nil
 }
 
 func connectorConfig(c *gin.Context, pool *pgxpool.Pool, platform string, _ bool) {
+	platform = canonicalPlatform(platform)
+	storagePlatforms := platformStorageValues(platform)
 	accountID, ok := connectorAccountID(c, pool, platform)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "connector not bound"})
@@ -719,12 +693,13 @@ func connectorConfig(c *gin.Context, pool *pgxpool.Pool, platform string, _ bool
 	var mode string
 	var selected []byte
 	var history, updated *time.Time
-	err := pool.QueryRow(c, `SELECT listen_mode,selected_conversations,history_start_at,config_updated_at FROM ingestion.collector_bindings WHERE source_account_id=$1 AND collector_type=$2`, accountID, platform).Scan(&mode, &selected, &history, &updated)
+	var enabled bool
+	err := pool.QueryRow(c, `SELECT listen_mode,selected_conversations,history_start_at,config_updated_at,enabled FROM ingestion.collector_bindings WHERE source_account_id=$1 AND collector_type=ANY($2::text[]) ORDER BY CASE WHEN collector_type=$3 THEN 0 ELSE 1 END LIMIT 1`, accountID, storagePlatforms, platform).Scan(&mode, &selected, &history, &updated, &enabled)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "connector config not found"})
 		return
 	}
-	c.Data(http.StatusOK, "application/json", []byte(fmt.Sprintf(`{"listen_mode":%q,"selected_conversations":%s,"history_start_at":%s,"config_updated_at":%s}`, mode, selected, nullableTime(history), nullableTime(updated))))
+	c.Data(http.StatusOK, "application/json", []byte(fmt.Sprintf(`{"listen_mode":%q,"selected_conversations":%s,"history_start_at":%s,"config_updated_at":%s,"enabled":%t}`, mode, selected, nullableTime(history), nullableTime(updated), enabled)))
 }
 
 func nullableTime(value *time.Time) string {
@@ -736,6 +711,8 @@ func nullableTime(value *time.Time) string {
 }
 
 func listConnectorConversations(c *gin.Context, pool *pgxpool.Pool, platform string) {
+	platform = canonicalPlatform(platform)
+	storagePlatforms := platformStorageValues(platform)
 	accountID, ok := connectorAccountID(c, pool, platform)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "connector not bound"})
@@ -754,9 +731,9 @@ func listConnectorConversations(c *gin.Context, pool *pgxpool.Pool, platform str
 	}
 	pattern := "%" + search + "%"
 	rows, err := pool.Query(c, `SELECT c.external_conversation_id,COALESCE(c.name,''),c.conversation_type,c.last_seen_at,c.raw_payload,
-        EXISTS(SELECT 1 FROM ingestion.collector_bindings b WHERE b.source_account_id=$1 AND b.collector_type=$2 AND b.selected_conversations ? c.external_conversation_id)
-        FROM ingestion.conversations c WHERE c.source_account_id=$1 AND ($3='' OR lower(c.external_conversation_id||' '||COALESCE(c.name,'')) LIKE $4) AND ($5='' OR c.conversation_type=$5)
-        ORDER BY c.last_seen_at DESC NULLS LAST,c.id DESC LIMIT $6 OFFSET $7`, accountID, platform, search, pattern, typ, size, (page-1)*size)
+        EXISTS(SELECT 1 FROM ingestion.collector_bindings b WHERE b.source_account_id=$1 AND b.collector_type=ANY($2::text[]) AND b.selected_conversations ? c.external_conversation_id)
+        FROM ingestion.conversations c WHERE c.source_account_id=$1 AND c.platform=ANY($2::text[]) AND ($3='' OR lower(c.external_conversation_id||' '||COALESCE(c.name,'')) LIKE $4) AND ($5='' OR c.conversation_type=$5)
+        ORDER BY c.last_seen_at DESC NULLS LAST,c.id DESC LIMIT $6 OFFSET $7`, accountID, storagePlatforms, search, pattern, typ, size, (page-1)*size)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "failed to list conversations"})
 		return
@@ -773,11 +750,13 @@ func listConnectorConversations(c *gin.Context, pool *pgxpool.Pool, platform str
 		}
 	}
 	var total int
-	_ = pool.QueryRow(c, `SELECT count(*) FROM ingestion.conversations c WHERE c.source_account_id=$1 AND ($2='' OR lower(c.external_conversation_id||' '||COALESCE(c.name,'')) LIKE $3) AND ($4='' OR c.conversation_type=$4)`, accountID, search, pattern, typ).Scan(&total)
+	_ = pool.QueryRow(c, `SELECT count(*) FROM ingestion.conversations c WHERE c.source_account_id=$1 AND c.platform=ANY($2::text[]) AND ($3='' OR lower(c.external_conversation_id||' '||COALESCE(c.name,'')) LIKE $4) AND ($5='' OR c.conversation_type=$5)`, accountID, storagePlatforms, search, pattern, typ).Scan(&total)
 	c.JSON(200, gin.H{"conversations": items, "page": page, "page_size": size, "total": total})
 }
 
 func updateConnectorConfig(c *gin.Context, pool *pgxpool.Pool, cfg config.Config, platform string) {
+	platform = canonicalPlatform(platform)
+	storagePlatforms := platformStorageValues(platform)
 	accountID, ok := connectorAccountID(c, pool, platform)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "connector not bound"})
@@ -798,7 +777,11 @@ func updateConnectorConfig(c *gin.Context, pool *pgxpool.Pool, cfg config.Config
 		}
 	}
 	selected, _ := json.Marshal(clean)
-	_, err := pool.Exec(c, `UPDATE ingestion.collector_bindings SET listen_mode='whitelist',selected_conversations=$1::jsonb,history_start_at=$2,config_updated_at=now(),updated_at=now() WHERE source_account_id=$3 AND collector_type=$4`, selected, input.HistoryStartAt, accountID, platform)
+	enabled := true
+	if input.Enabled != nil {
+		enabled = *input.Enabled
+	}
+	_, err := pool.Exec(c, `UPDATE ingestion.collector_bindings SET listen_mode='whitelist',selected_conversations=$1::jsonb,history_start_at=$2,enabled=$3,config_updated_at=now(),updated_at=now() WHERE source_account_id=$4 AND collector_type=ANY($5::text[])`, selected, input.HistoryStartAt, enabled, accountID, storagePlatforms)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "failed to save connector config"})
 		return
@@ -915,6 +898,7 @@ func listMessages(c *gin.Context, pool *pgxpool.Pool) {
 			c.JSON(500, gin.H{"error": "failed to read messages"})
 			return
 		}
+		m.Source = canonicalPlatformForOutput(m.Source)
 		_ = json.Unmarshal(attachments, &m.Attachments)
 		if m.Attachments == nil {
 			m.Attachments = []gin.H{}

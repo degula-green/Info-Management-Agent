@@ -33,7 +33,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
 import InfoSidebar from '@/components/InfoSidebar.vue'
@@ -41,12 +41,14 @@ import InfoCommandPalette from '@/components/InfoCommandPalette.vue'
 import InfoResultDrawer from '@/components/InfoResultDrawer.vue'
 import { type SearchResult } from '@/mock'
 import { useInfoMockStore } from '@/stores/infoMock'
+import { normalizeSourceKey, useInfoKnowledgeStore } from '@/stores/infoKnowledge'
 import { getProfile } from '@/api/info-profile'
 import { searchInfo } from '@/api/info-search'
+import { mapInfoSearchResult } from '@/utils/info-search-result'
 import { listQaConversations, type QaConversation } from '@/api/qa-history'
 import { renameQaConversation, deleteQaConversation } from '@/api/qa-history'
 
-const store = useInfoMockStore(); const router = useRouter(); const route = useRoute()
+const store = useInfoMockStore(); const knowledgeStore = useInfoKnowledgeStore(); const router = useRouter(); const route = useRoute()
 // Keep the mock profile out of the initial render; the profile API is authoritative.
 const sidebarNickname = ref('')
 const sidebarAvatar = ref('')
@@ -67,14 +69,22 @@ onMounted(async () => {
     sidebarAvatar.value = store.profile.avatar
   }
   await refreshQaConversations()
+  await knowledgeStore.ensureSources()
 })
 watch(() => route.fullPath, () => { void refreshQaConversations() })
+const knowledgePollTimer = ref<number | null>(null)
+onMounted(() => {
+  knowledgePollTimer.value = window.setInterval(() => { void knowledgeStore.ensureSources(true) }, 30000)
+})
+onBeforeUnmount(() => {
+  if (knowledgePollTimer.value != null) window.clearInterval(knowledgePollTimer.value)
+})
 const sidebarCollapsed = ref(false); const paletteVisible = ref(false); const paletteQuery = ref(''); const paletteResults = ref<SearchResult[]>([]); const paletteLoading = ref(false); const drawerVisible = ref(false); const drawerResult = ref<SearchResult | null>(null); const toastText = ref(''); const toastDialogVisible = ref(false); const protocolDialogVisible = ref(false); const protocolType = ref<'terms' | 'privacy'>('terms'); let paletteSearchTimer: ReturnType<typeof setTimeout> | undefined; let paletteSearchSeq = 0
 const activeKey = computed(() => {
   if (paletteVisible.value) return 'search'
   if (route.name === 'chat') return 'new-chat'; if (route.name === 'search') return 'search'; if (route.name === 'knowledge' || route.name === 'knowledgePlatform' || route.params.platform) return 'knowledge'; if (route.name === 'profile') return 'profile'; return 'new-chat'
 })
-const pageTitle = computed(() => ({ dashboard: '概览', search: '搜索', knowledge: '知识库', chat: '新对话', profile: '个人中心' } as Record<string, string>)[String(route.name)] || (route.params.platform ? store.findSource(String(route.params.platform))?.kbName || '知识库' : '概览'))
+const pageTitle = computed(() => ({ dashboard: '概览', search: '搜索', knowledge: '知识库', chat: '新对话', profile: '个人中心' } as Record<string, string>)[String(route.name)] || (route.params.platform ? knowledgeStore.findSource(normalizeSourceKey(String(route.params.platform)) || undefined)?.kbName || store.findSource(normalizeSourceKey(String(route.params.platform)) || undefined)?.kbName || '知识库' : '概览'))
 
 async function navigate(view: string) {
   if (view === 'search') { openSearch(); return }
@@ -111,13 +121,7 @@ function runPaletteSearch(query: string, committed = false) {
       const response = await searchInfo({ query: normalized, page: 1, page_size: 20 }) as any
       if (seq !== paletteSearchSeq) return
       paletteLoading.value = false
-      paletteResults.value = (Array.isArray(response?.items) ? response.items : []).filter((item: any) => item.kind !== 'qa').map((item: any) => ({
-        id: String(item.id), kind: item.kind === 'file' ? 'file' : item.kind === 'chat' ? 'chat' : 'message',
-        title: item.title || '消息', subtitle: item.highlight || item.subtitle || item.content || '', source: item.platform || item.source || 'wechat',
-        platform: item.platform || item.source || 'wechat', chatId: item.conversation_id ? String(item.conversation_id) : undefined,
-        recordId: item.message_id || item.attachment_id ? String(item.message_id || item.attachment_id) : undefined,
-        content: item.content, sender: item.sender_name, time: item.occurred_at, score: item.score,
-      }))
+      paletteResults.value = (Array.isArray(response?.items) ? response.items : []).filter((item: any) => item.kind !== 'qa').map((item: any) => mapInfoSearchResult(item))
       if (committed) store.addRecentSearch(normalized)
     } catch { if (seq === paletteSearchSeq) { paletteResults.value = []; paletteLoading.value = false } }
   }, 180)

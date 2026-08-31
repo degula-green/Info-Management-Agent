@@ -5,28 +5,32 @@ export interface InfoAttachment { id: string; name: string; type: 'file' | 'imag
 
 export interface InfoMessage {
   id: string; sender: string; content: string; time: string; timestamp: string
-  attachments?: InfoAttachment[]
+  attachments?: InfoAttachment[]; vectorStatus?: string; sourceMessageId?: string; senderAvatarUrl?: string
+  isDeleted?: boolean; isUpdated?: boolean; messageType?: string; sourceMessageType?: string; metadata?: Record<string, unknown>
 }
 
 export interface InfoFile {
   id: string; name: string; type: string; size: string; time: string
-  uploadedAt: string; uploader: string; content: string
+  uploadedAt: string; uploader: string; content: string; documentId?: number | null; documentStatus?: string | null
+  parseStatus?: string; previewCapability?: string; isDeleted?: boolean; fileSizeBytes?: number | null
 }
 
 export interface InfoChat {
   id: string; name: string; source: SourceKey; members: number; collecting: boolean
   collectionStatus: CollectionStatus; historyStart: string; interval: string
   lastSync: string; recentMessageTime: string; messages: InfoMessage[]; files: InfoFile[]
+  externalId?: string; lastSeenAt?: string | null; messageCount?: number; attachmentCount?: number; selected?: boolean
   isDirect?: boolean
 }
 
 export interface InfoAvailableSession {
-  id: string; name: string; members: number; isDirect?: boolean
+  id: string; name: string; members: number; isDirect?: boolean; externalId?: string; lastSeenAt?: string | null; messageCount?: number; attachmentCount?: number
 }
 
 export interface InfoSource {
   key: SourceKey; name: string; kbName: string; description: string
   account: string; bound: boolean; chats: InfoChat[]; availableSessions: InfoAvailableSession[]
+  selectedConversationCount?: number; lastSyncAt?: string | null; enabled?: boolean; available?: boolean; historyStartAt?: string | null; lastError?: string | null; status?: 'unbound' | 'active' | 'paused' | 'error' | 'offline'
 }
 
 export interface QASession {
@@ -36,15 +40,15 @@ export interface QASession {
 
 export interface SearchResult {
   id: string; kind: 'chat' | 'message' | 'file' | 'qa'; title: string; subtitle: string
-  source: string; platform: SourceKey | 'qa'; chatId?: string; recordId?: string
+  source: string; platform: SourceKey | 'all' | 'qa'; chatId?: string; recordId?: string
   content?: string; context?: InfoMessage[]; sender?: string; uploader?: string
-  time?: string; score?: number
+  time?: string; score?: number; question?: string; answer?: string; citations?: Array<Record<string, unknown>>
 }
 
 export interface InfoProfile { nickname: string; email: string; avatar: string }
 export interface InfoMockState { profile: InfoProfile; sources: InfoSource[]; qaSessions: QASession[]; recentSearches: string[] }
 
-export const sourceColor: Record<SourceKey, string> = { feishu: '#3370ff', wecom: '#07c160', wechat: '#10a37f' }
+export const sourceColor: Record<SourceKey, string> = { feishu: '#3370ff', wecom: '#10a37f', wechat: '#07c160' }
 export const sourceNameMap: Record<SourceKey, string> = { feishu: '飞书', wecom: '企业微信', wechat: '个人微信' }
 export function sourceName(key: SourceKey) { return sourceNameMap[key] }
 
@@ -72,14 +76,7 @@ export function createInitialMockState(): InfoMockState {
         chat({ id: 'feishu-admin', name: '行政协作群', source: 'feishu', members: 9, collecting: true, collectionStatus: 'collecting', historyStart: '2026-08-16', lastSync: '22 分钟前', recentMessageTime: '昨天 14:06', messages: [{ id: 'm4', sender: '王璐', content: '会议室 A 已预订，访客信息请在今天下班前提交。', time: '昨天 14:06', timestamp: '2026-08-29T14:06:00+08:00' }] }),
         chat({ id: 'feishu-dm', name: '林默 ↔ 陈曦', source: 'feishu', members: 2, isDirect: true, collecting: false, collectionStatus: 'paused', historyStart: '2026-08-20', lastSync: '已暂停', recentMessageTime: '8 月 27 日 16:10', messages: [{ id: 'm7', sender: '陈曦', content: '数据库迁移方案我看过了，建议把回滚步骤再补充一下。', time: '8 月 27 日 16:10', timestamp: '2026-08-27T16:10:00+08:00' }] }),
       ] },
-      { key: 'wecom', name: '企业微信', kbName: '企业微信知识库', description: '企业微信群聊、私聊消息与文件', account: '林默 · 企业微信', bound: true, availableSessions: [
-        { id: 'wecom-ops', name: '运营增长群', members: 14 },
-        { id: 'wecom-delivery', name: '项目交付群', members: 9 },
-        { id: 'wecom-dm-zhaokai', name: '林默 ↔ 赵凯', members: 2, isDirect: true },
-      ], chats: [
-        chat({ id: 'wecom-client', name: '客户项目群', source: 'wecom', members: 12, collecting: true, collectionStatus: 'collecting', historyStart: '2026-08-25', lastSync: '12 分钟前', recentMessageTime: '今天 10:15', messages: [{ id: 'm5', sender: '赵凯', content: '客户希望把验收时间提前到本周四。', time: '今天 10:15', timestamp: '2026-08-30T10:15:00+08:00' }] }),
-        chat({ id: 'wecom-engineering', name: '后端研发群', source: 'wecom', members: 24, collecting: false, collectionStatus: 'paused', historyStart: '2026-08-22', lastSync: '已暂停', recentMessageTime: '昨天 17:32', messages: [{ id: 'm8', sender: '张三', content: '数据库迁移方案已提交评审，今晚会补一版压测结果。', time: '昨天 17:32', timestamp: '2026-08-29T17:32:00+08:00' }] }),
-      ] },
+      { key: 'wecom', name: '企业微信', kbName: '企业微信知识库', description: '企业微信知识库（当前不可采集消息）', account: '', bound: false, available: false, availableSessions: [], chats: [] },
       { key: 'wechat', name: '个人微信', kbName: '个人微信知识库', description: '个人微信群聊、私聊消息与文件', account: '', bound: false, availableSessions: [
         { id: 'wechat-weekend', name: '周末徒步群', members: 7 },
         { id: 'wechat-dm-yangfan', name: '林默 ↔ 杨帆', members: 2, isDirect: true },
@@ -90,7 +87,7 @@ export function createInitialMockState(): InfoMockState {
     ],
     qaSessions: [
       { id: 'qa-1', question: '本周有哪些需要跟进的事项？', answer: '本周需要跟进发布说明确认、用户反馈整理和客户验收时间调整。', summary: '发布计划、用户反馈与客户验收安排', source: '全部数据', time: '今天 11:20' },
-      { id: 'qa-2', question: '数据库迁移方案的风险是什么？', answer: '当前上下文里提到的风险主要是回滚步骤和压测结果仍需补充。', summary: '回滚步骤与压测结果需要补齐', source: '企业微信', time: '昨天 18:05' },
+      { id: 'qa-2', question: '数据库迁移方案的风险是什么？', answer: '当前上下文里提到的风险主要是回滚步骤和压测结果仍需补充。', summary: '回滚步骤与压测结果需要补齐', source: '个人微信', time: '昨天 18:05' },
     ],
     recentSearches: ['数据库迁移方案', '版本发布', '验收时间'],
   }

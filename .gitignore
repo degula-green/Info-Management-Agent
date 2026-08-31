@@ -1,6 +1,7 @@
 .env
 services/*/.env
 node_modules/
+.npm-cache/
 dist/
 __pycache__/
 *.pyc

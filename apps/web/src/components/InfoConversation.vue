@@ -24,8 +24,8 @@
 
     <div class="conversation-meta">
       <span><t-icon name="time" /> 历史起点：{{ chat.historyStart || '尚未设置' }}</span>
-      <span><t-icon name="chat" /> {{ chat.messages.length }} 条消息</span>
-      <span><t-icon name="file" /> {{ chat.files.length }} 个文件</span>
+      <span><t-icon name="chat" /> {{ chat.messageCount ?? chat.messages.length }} 条消息</span>
+      <span><t-icon name="file" /> {{ chat.attachmentCount ?? chat.files.length }} 个文件</span>
     </div>
 
     <div class="conversation-list wk-panel">
@@ -70,24 +70,106 @@
       <div v-else class="wk-empty-inline">还没有采集到消息或文件</div>
     </div>
 
-    <t-drawer v-model:visible="drawerVisible" :header="drawerTitle" size="520px" :footer="false" destroy-on-close>
-      <div class="wk-preview">
-        <div class="wk-preview__meta"><t-tag theme="primary" variant="light">{{ drawerKind }}</t-tag><span>{{ sourceName(chat.source) }} · {{ chat.name }}</span></div>
-        <div v-if="drawerFile" class="wk-file-preview"><t-icon name="file" /><div><strong>{{ drawerFile.name }}</strong><small>{{ drawerFile.type }} · {{ drawerFile.size }} · 上传人 {{ drawerFile.uploader }}</small></div></div>
-        <div v-if="drawerKind === '消息'" class="drawer-facts"><span><b>发送人</b>{{ drawerMessage?.sender }}</span><span><b>时间</b>{{ drawerMessage?.time }}</span><span><b>来源平台</b>{{ sourceName(chat.source) }}</span></div>
-        <t-textarea v-model="draft" :readonly="!editing" :autosize="{ minRows: 10, maxRows: 24 }" placeholder="内容" />
-        <div class="wk-preview__actions">
-          <t-button v-if="!editing" variant="outline" @click="editing = true"><template #icon><t-icon name="edit" /></template>编辑</t-button>
-          <t-button v-else theme="primary" @click="save"><template #icon><t-icon name="check" /></template>保存</t-button>
-          <t-button variant="outline" @click="emit('toast', '已生成下载文件（原型演示）')"><template #icon><t-icon name="download" /></template>下载</t-button>
-        </div>
-      </div>
-    </t-drawer>
+    <t-dialog
+      v-model:visible="messageDialogVisible"
+      :header="false"
+      :footer="false"
+      :close-btn="false"
+      width="min(840px, calc(100vw - 32px))"
+      dialog-class-name="info-message-dialog"
+      placement="center"
+      destroy-on-close
+    >
+      <article v-if="activeMessage" class="detail-modal" aria-labelledby="message-detail-title">
+        <header class="detail-modal__header">
+          <div class="detail-modal__heading">
+            <h2 id="message-detail-title">消息详情</h2>
+            <div class="detail-modal__meta">
+              <span><t-icon name="chat-bubble" />消息</span>
+              <span><t-icon name="user" />{{ activeMessage.sender }}</span>
+              <span><t-icon name="time" />{{ activeMessage.time }}</span>
+            </div>
+          </div>
+          <button type="button" class="detail-modal__close" aria-label="关闭消息详情" @click="messageDialogVisible = false">
+            <t-icon name="close" />
+          </button>
+        </header>
+
+        <main class="detail-modal__body">
+          <t-textarea v-if="editing" v-model="draft" class="message-editor" :autosize="{ minRows: 8, maxRows: 18 }" placeholder="消息内容" autofocus />
+          <div v-else class="message-content">{{ activeMessage.content || '（空消息）' }}</div>
+        </main>
+
+        <footer class="detail-modal__footer">
+          <div class="detail-modal__status">
+            <span class="status-dot" :class="statusTone(activeMessage.vectorStatus)" />
+            <span>{{ messageStatus(activeMessage.vectorStatus) }}</span>
+            <span class="record-id">消息 ID: {{ activeMessage.sourceMessageId || activeMessage.id }}</span>
+          </div>
+          <div class="detail-modal__actions">
+            <t-button v-if="editing" variant="outline" @click="cancelEdit">取消</t-button>
+            <t-button v-if="!editing" variant="outline" theme="primary" @click="editing = true">
+              <template #icon><t-icon name="edit" /></template>编辑
+            </t-button>
+            <t-button v-else theme="primary" @click="save">
+              <template #icon><t-icon name="check" /></template>保存
+            </t-button>
+            <t-button variant="outline" @click="downloadMessage">
+              <template #icon><t-icon name="download" /></template>下载
+            </t-button>
+          </div>
+        </footer>
+      </article>
+    </t-dialog>
+
+    <t-dialog
+      v-model:visible="fileDialogVisible"
+      :header="false"
+      :footer="false"
+      :close-btn="false"
+      width="min(92vw, 1720px)"
+      dialog-class-name="info-file-dialog"
+      placement="center"
+      destroy-on-close
+    >
+      <article v-if="activeFile" class="detail-modal document-modal" aria-labelledby="file-detail-title">
+        <header class="detail-modal__header document-modal__header">
+          <div class="detail-modal__heading">
+            <h2 id="file-detail-title" :title="activeFile.name">{{ activeFile.name }}</h2>
+            <div class="detail-modal__meta">
+              <span><t-icon name="file" />{{ fileTypeLabel(activeFile) }}</span>
+              <span><t-icon name="data" />{{ activeFile.size }}</span>
+              <span><t-icon name="time" />{{ activeFile.uploadedAt || activeFile.time }}</span>
+            </div>
+          </div>
+          <button type="button" class="detail-modal__close" aria-label="关闭文档预览" @click="fileDialogVisible = false">
+            <t-icon name="close" />
+          </button>
+        </header>
+
+        <main class="document-modal__canvas">
+          <InfoAttachmentPreview :file="activeFile" :active="fileDialogVisible" />
+        </main>
+
+        <footer class="detail-modal__footer document-modal__footer">
+          <div class="detail-modal__status">
+            <span class="status-dot" :class="statusTone(activeFile.documentStatus || activeFile.parseStatus)" />
+            <span>{{ fileStatus(activeFile) }}</span>
+            <span class="record-id">文档 ID: {{ activeFile.documentId ?? activeFile.id }}</span>
+          </div>
+          <t-button variant="outline" :loading="fileDownloading" @click="downloadFile">
+            <template #icon><t-icon name="download" /></template>下载
+          </t-button>
+        </footer>
+      </article>
+    </t-dialog>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { getKnowledgeAttachmentContent } from '@/api/info-knowledge'
+import InfoAttachmentPreview from '@/components/InfoAttachmentPreview.vue'
 import type { CollectionStatus, InfoChat, InfoFile, InfoMessage } from '@/mock'
 import { sourceName } from '@/mock'
 
@@ -114,36 +196,36 @@ const emit = defineEmits<{
 }>()
 
 const chat = computed(() => props.chat)
-const drawerVisible = ref(false)
-const drawerKind = ref('消息')
-const drawerTitle = ref('')
-const drawerFile = ref<InfoFile | null>(null)
-const drawerMessage = ref<InfoMessage | null>(null)
+const messageDialogVisible = ref(false)
+const fileDialogVisible = ref(false)
+const activeMessage = ref<InfoMessage | null>(null)
+const activeFile = ref<InfoFile | null>(null)
 const draft = ref('')
 const editing = ref(false)
+const fileDownloading = ref(false)
 
 const items = computed<ConversationItem[]>(() => [
-  ...chat.value.messages.map((message) => ({
-    key: `message-${message.id}`,
-    kind: 'message' as const,
-    name: message.content,
-    detail: `${message.sender} · ${message.time}`,
-    status: '采集完成',
-    size: '-',
-    type: '消息',
-    source: sourceName(chat.value.source),
-    updatedAt: message.time,
+    ...chat.value.messages.map((message) => ({
+      key: `message-${message.id}`,
+      kind: 'message' as const,
+      name: message.content,
+      detail: `${message.sender} · ${message.time}`,
+      status: message.vectorStatus === 'failed' ? '索引失败' : message.vectorStatus === 'completed' ? '索引完成' : message.vectorStatus || '已采集',
+      size: '-',
+      type: '消息',
+      source: sourceName(chat.value.source),
+      updatedAt: message.time,
     message,
   })),
   ...chat.value.files.map((file) => ({
-    key: `file-${file.id}`,
-    kind: 'file' as const,
-    name: file.name,
-    detail: `${file.uploader} · ${file.type}`,
-    status: '解析完成',
-    size: file.size,
-    type: file.type,
-    source: sourceName(chat.value.source),
+      key: `file-${file.id}`,
+      kind: 'file' as const,
+      name: file.name,
+      detail: `${file.uploader} · ${file.type}`,
+      status: file.documentStatus === 'failed' ? '解析失败' : file.documentStatus === 'completed' ? '解析完成' : file.documentStatus || file.parseStatus || '待解析',
+      size: file.size,
+      type: file.type,
+      source: sourceName(chat.value.source),
     updatedAt: file.uploadedAt || file.time,
     file,
   })),
@@ -153,12 +235,72 @@ const collectionHint = computed(() => chat.value.collectionStatus === 'collectin
 
 function statusLabel(status: CollectionStatus) { return status === 'collecting' ? '采集中' : status === 'paused' ? '已暂停' : '未开始' }
 function openItem(item: ConversationItem) { if (item.kind === 'message' && item.message) openMessage(item.message); if (item.kind === 'file' && item.file) openFile(item.file) }
-function openMessage(message: InfoMessage) { drawerKind.value = '消息'; drawerTitle.value = '原始消息'; drawerFile.value = null; drawerMessage.value = message; draft.value = message.content; editing.value = false; drawerVisible.value = true }
-function openFile(file: InfoFile) { drawerKind.value = '文件'; drawerTitle.value = file.name; drawerFile.value = file; drawerMessage.value = null; draft.value = file.content; editing.value = false; drawerVisible.value = true }
-function save() {
-  if (drawerKind.value === '消息' && drawerMessage.value) emit('edit', { kind: '消息', chatId: chat.value.id, recordId: drawerMessage.value.id, content: draft.value })
-  if (drawerKind.value === '文件' && drawerFile.value) emit('edit', { kind: '文件', chatId: chat.value.id, recordId: drawerFile.value.id, content: draft.value })
+function openMessage(message: InfoMessage) { activeMessage.value = message; activeFile.value = null; draft.value = message.content; editing.value = false; messageDialogVisible.value = true }
+function openFile(file: InfoFile) { activeFile.value = file; activeMessage.value = null; editing.value = false; fileDialogVisible.value = true }
+
+function messageStatus(status?: string | null) {
+  if (status === 'failed') return '索引失败'
+  if (status === 'completed') return '索引完成'
+  return status || '已采集'
+}
+
+function fileStatus(file: InfoFile) {
+  const status = file.documentStatus || file.parseStatus
+  if (status === 'failed') return '解析失败'
+  if (status === 'completed') return '解析完成'
+  return status || '待解析'
+}
+
+function statusTone(status?: string | null) {
+  if (status === 'failed') return 'status-dot--error'
+  if (status === 'completed') return 'status-dot--success'
+  return 'status-dot--pending'
+}
+
+function fileTypeLabel(file: InfoFile) {
+  const type = String(file.type || '').replace(/^\./, '')
+  return (type || file.name.split('.').pop() || 'FILE').toUpperCase()
+}
+
+function cancelEdit() {
+  draft.value = activeMessage.value?.content || ''
   editing.value = false
+}
+
+function save() {
+  if (activeMessage.value) {
+    emit('edit', { kind: '消息', chatId: chat.value.id, recordId: activeMessage.value.id, content: draft.value })
+    activeMessage.value.content = draft.value
+  }
+  editing.value = false
+}
+
+function saveBlob(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = fileName
+  anchor.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
+}
+
+function downloadMessage() {
+  if (!activeMessage.value) return
+  const blob = new Blob([activeMessage.value.content || ''], { type: 'text/plain;charset=utf-8' })
+  saveBlob(blob, `消息-${activeMessage.value.id}.txt`)
+}
+
+async function downloadFile() {
+  if (!activeFile.value || fileDownloading.value) return
+  fileDownloading.value = true
+  try {
+    const blob = await getKnowledgeAttachmentContent(activeFile.value.id, true)
+    saveBlob(blob, activeFile.value.name)
+  } catch (error: any) {
+    emit('toast', error?.message || '源文件下载失败，请稍后重试')
+  } finally {
+    fileDownloading.value = false
+  }
 }
 </script>
 
@@ -201,17 +343,35 @@ function save() {
 .conversation-status { color: var(--td-success-color); background: var(--td-success-color-1); }
 .conversation-type { color: var(--td-text-color-secondary); background: var(--td-bg-color-secondarycontainer); }
 .wk-empty-inline { padding: 70px 20px; color: var(--td-text-color-placeholder); text-align: center; font-size: 12px; }
-.wk-preview { padding: 2px 0 8px; }
-.wk-preview__meta { display: flex; align-items: center; gap: 9px; margin-bottom: 18px; color: var(--td-text-color-secondary); font-size: 11px; }
-.wk-file-preview { display: flex; align-items: center; gap: 10px; margin-bottom: 15px; padding: 13px; border: 1px solid var(--td-component-stroke); border-radius: 6px; background: var(--td-bg-color-secondarycontainer); }
-.wk-file-preview > svg { width: 24px; color: var(--td-warning-color); }
-.wk-file-preview strong, .wk-file-preview small { display: block; }
-.wk-file-preview strong { font-size: 13px; }
-.wk-file-preview small { margin-top: 4px; color: var(--td-text-color-secondary); font-size: 11px; }
-.drawer-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-bottom: 14px; padding: 10px 12px; border: 1px solid var(--td-component-stroke); border-radius: 6px; background: var(--td-bg-color-secondarycontainer); font-size: 11px; }
-.drawer-facts span { display: flex; gap: 5px; color: var(--td-text-color-secondary); }
-.drawer-facts b { color: var(--td-text-color-placeholder); font-weight: 400; }
-.wk-preview__actions { display: flex; gap: 8px; margin-top: 15px; }
+.detail-modal { display: flex; max-height: calc(100dvh - 48px); flex-direction: column; overflow: hidden; background: var(--td-bg-color-container); }
+.detail-modal__header { display: flex; flex: 0 0 auto; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 28px 32px 20px; border-bottom: 1px solid var(--td-component-stroke); }
+.detail-modal__heading { min-width: 0; }
+.detail-modal__heading h2 { margin: 0; overflow: hidden; color: var(--td-text-color-primary); font-size: 20px; font-weight: 600; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+.detail-modal__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 13px; color: var(--td-text-color-placeholder); font-size: 12px; }
+.detail-modal__meta span { display: inline-flex; align-items: center; gap: 6px; }
+.detail-modal__meta svg { width: 16px; height: 16px; }
+.detail-modal__close { display: inline-flex; width: 44px; height: 44px; flex: 0 0 44px; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 4px; color: var(--td-text-color-placeholder); background: transparent; cursor: pointer; }
+.detail-modal__close:hover { color: var(--td-text-color-primary); background: var(--td-bg-color-container-hover); }
+.detail-modal__close:focus-visible { outline: 2px solid var(--td-brand-color); outline-offset: 2px; }
+.detail-modal__close svg { width: 22px; height: 22px; }
+.detail-modal__body { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; padding: 20px 24px 18px; overflow: hidden; }
+.message-content { width: 100%; max-height: min(68vh, 720px); color: var(--td-text-color-primary); font-size: 14px; line-height: 1.8; overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; }
+.message-editor { width: 100%; }
+.message-editor :deep(textarea) { max-height: min(68vh, 720px); overflow-y: auto; }
+.detail-modal__footer { display: flex; min-height: 76px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 24px; border-top: 1px solid var(--td-component-stroke); background: var(--td-bg-color-container); }
+.detail-modal__status { display: flex; min-width: 0; align-items: center; gap: 9px; color: var(--td-text-color-secondary); font-size: 12px; }
+.status-dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: var(--td-text-color-disabled); }
+.status-dot--success { background: var(--td-success-color); }
+.status-dot--error { background: var(--td-error-color); }
+.status-dot--pending { background: var(--td-warning-color); }
+.record-id { max-width: 360px; overflow: hidden; color: var(--td-text-color-placeholder); text-overflow: ellipsis; white-space: nowrap; }
+.detail-modal__actions { display: flex; flex: 0 0 auto; gap: 10px; }
+.document-modal { height: min(92dvh, 1080px); max-height: calc(100dvh - 32px); }
+.document-modal__header { padding: 22px 28px 16px; }
+.document-modal__canvas { flex: 1; min-height: 0; overflow: auto; padding: 18px 20px 20px; background: #f4f5f7; }
+.document-modal__footer { min-height: 76px; }
+:global(.info-message-dialog.t-dialog), :global(.info-file-dialog.t-dialog) { padding: 0; overflow: hidden; border-radius: 14px; }
+:global(.info-message-dialog .t-dialog__body), :global(.info-file-dialog .t-dialog__body) { padding: 0; }
 @media (max-width: 850px) {
   .conversation-table__head { display: none; }
   .conversation-row { grid-template-columns: 1fr 1fr; gap: 10px 16px; padding: 15px 17px; }
@@ -226,5 +386,20 @@ function save() {
   .conversation-list__tabs { padding: 0 14px; }
   .conversation-tab { font-size: 14px; }
   .conversation-list__hint { display: none; }
+  :global(.t-dialog__position:has(> .info-message-dialog)), :global(.t-dialog__position:has(> .info-file-dialog)) { width: 100vw; height: 100dvh; padding: 0; }
+  :global(.info-message-dialog.t-dialog), :global(.info-file-dialog.t-dialog) { width: 100vw !important; max-width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; }
+  .detail-modal, .document-modal { width: 100%; height: 100dvh; max-height: 100dvh; }
+  .detail-modal__header { gap: 12px; padding: 20px 18px 14px; }
+  .detail-modal__heading h2 { font-size: 18px; }
+  .detail-modal__meta { gap: 10px 14px; margin-top: 10px; }
+  .detail-modal__body { flex: 1; min-height: 0; padding: 18px 16px 16px; }
+  .message-content { max-height: min(70vh, 620px); font-size: 14px; line-height: 1.75; }
+  .message-editor :deep(textarea) { max-height: min(70vh, 620px); font-size: 14px; }
+  .detail-modal__footer { min-height: 72px; flex-wrap: wrap; gap: 12px; padding: 12px 16px; }
+  .detail-modal__status { max-width: 100%; flex-wrap: wrap; }
+  .record-id { max-width: min(70vw, 320px); }
+  .detail-modal__actions { margin-left: auto; }
+  .document-modal__canvas { overflow: auto; }
+  .document-modal__footer { flex-wrap: nowrap; }
 }
 </style>

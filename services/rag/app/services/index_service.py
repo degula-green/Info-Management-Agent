@@ -6,6 +6,7 @@ from pathlib import Path
 from elasticsearch import Elasticsearch, helpers
 
 from app.config import settings
+from app.services.vectorization import canonical_platform
 
 
 def client() -> Elasticsearch:
@@ -18,6 +19,10 @@ def client() -> Elasticsearch:
 def _mapping_definition() -> dict:
     path = Path(__file__).resolve().parents[2] / "config" / "elasticsearch" / "documents-index.json"
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _canonical_platform(value: object) -> str:
+    return canonical_platform(value) or str(value or "")
 
 
 def ensure_index(es: Elasticsearch | None = None) -> None:
@@ -49,6 +54,12 @@ def index_chunks(chunks: list[dict]) -> None:
                 source["attachment_id"] = int(source["file_id"])
             except (TypeError, ValueError):
                 pass
+        if "source" in source:
+            source["source"] = _canonical_platform(source.get("source"))
+        if "platform" in source:
+            source["platform"] = _canonical_platform(source.get("platform"))
+        elif source.get("source"):
+            source["platform"] = source["source"]
         actions.append({"_index": settings.elasticsearch_index, "_id": chunk["chunk_id"], "_source": source})
     if actions:
         helpers.bulk(es, actions, raise_on_error=True, raise_on_exception=True)

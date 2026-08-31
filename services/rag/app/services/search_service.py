@@ -8,7 +8,7 @@ import urllib.request
 
 from app.config import settings
 from app.services.index_service import client as elasticsearch_client
-from app.services.vectorization import EmbeddingClient
+from app.services.vectorization import EmbeddingClient, canonical_platform
 
 
 @dataclass(frozen=True)
@@ -65,10 +65,19 @@ class SearchResult:
                    text(source.get("message_id") or source.get("source_message_id")), integer(source.get("conversation_id")),
                    str(source.get("content") or ""), float(hit.get("_score") or 0.0), rank,
                    file_name=text(source.get("file_name") or metadata.get("file_name")),
-                   source_position=text(source.get("source_position")), source=text(source.get("source") or source.get("platform")), metadata=metadata,
+                   source_position=text(source.get("source_position")), source=_canonical_platform(source.get("source") or source.get("platform")), metadata=metadata,
                    conversation_name=text(source.get("conversation_name")), sender_name=text(source.get("sender_name")),
                    resource_type=text(source.get("resource_type")), document_title=text(source.get("document_title")),
                    occurred_at=text(source.get("occurred_at")), highlight=text(highlighted))
+
+
+def _canonical_platform(value: Any) -> str:
+    return canonical_platform(value)
+
+
+def _platform_storage_values(value: Any) -> tuple[str, ...]:
+    canonical = _canonical_platform(value)
+    return ("wechat", "personal_wechat") if canonical == "wechat" else ((canonical,) if canonical else ())
 
 
 def scope_filter(scope: SearchScope, *, platforms: Iterable[str] = ()) -> list[dict[str, Any]]:
@@ -78,8 +87,18 @@ def scope_filter(scope: SearchScope, *, platforms: Iterable[str] = ()) -> list[d
                    else {"term": {"source_account_id": -1}})
     if scope.conversation_ids:
         filters.append({"terms": {"conversation_id": list(scope.conversation_ids)}})
-    if platforms:
-        filters.append({"terms": {"source": list(platforms)}})
+    platform_values: list[str] = []
+    for platform in platforms:
+        for value in _platform_storage_values(platform):
+            if value not in platform_values:
+                platform_values.append(value)
+    if platform_values:
+        # personal_wechat is queried only for legacy documents; all newly
+        # indexed documents are normalized to the canonical wechat value.
+        filters.append({"bool": {"should": [
+            {"terms": {"source": platform_values}},
+            {"terms": {"platform": platform_values}},
+        ], "minimum_should_match": 1}})
     return filters
 
 

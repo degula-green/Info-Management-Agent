@@ -10,6 +10,18 @@ from typing import Any, Callable, Iterable
 from app.config import settings
 
 
+def canonical_platform(value: Any) -> str:
+    """Return the canonical platform key used by PG, ES, and API payloads."""
+    text = str(value or "").strip().lower().replace("-", "_")
+    if text in {"wechat", "personal_wechat", "personalwechat"}:
+        return "wechat"
+    if text in {"wecom", "work_wechat", "enterprise_wechat"}:
+        return "wecom"
+    if text == "feishu":
+        return "feishu"
+    return ""
+
+
 def clean_text(value: Any) -> str:
     return " ".join(str(value or "").split())
 

@@ -16,15 +16,16 @@
 
       <div class="kb-section-label"><span>平台知识库</span><small>固定接入的三个数据来源</small></div>
       <div v-if="filteredSources.length" class="kb-grid">
-        <button v-for="source in filteredSources" :key="source.key" class="kb-card" type="button" @click="openSource(source)">
+        <button v-for="source in filteredSources" :key="source.key" class="kb-card" type="button" :disabled="source.available === false" @click="openSource(source)">
           <div class="kb-card__head">
             <span class="kb-card__icon" :style="{ background: sourceColor[source.key] }">{{ source.name.slice(0, 1) }}</span>
-            <t-tag :theme="source.bound ? 'success' : 'default'" variant="light" size="small">{{ source.bound ? '已连接' : '未绑定' }}</t-tag>
+            <t-tag :theme="source.bound ? 'success' : source.available === false ? 'warning' : 'default'" variant="light" size="small">{{ source.bound ? '已连接' : source.available === false ? '暂未开放' : '未绑定' }}</t-tag>
           </div>
           <div class="kb-card__name">{{ source.kbName }}</div>
-          <p>{{ source.description }}</p>
+          <p>{{ source.description }}<template v-if="source.lastError"> · {{ source.lastError }}</template></p>
           <div class="kb-card__foot">
-            <span v-if="source.bound"><t-icon name="chat" />{{ source.chats.length }} 个已接入会话</span>
+            <span v-if="source.available === false"><t-icon name="lock-on" />当前未开放</span>
+            <span v-else-if="source.bound"><t-icon name="chat" />{{ source.selectedConversationCount ?? source.chats.length }} 个已接入会话</span>
             <span v-else><t-icon name="lock-on" />绑定{{ source.name }}后开放</span>
             <t-icon name="chevron-right" />
           </div>
@@ -40,17 +41,21 @@
           <h1>{{ activeSource.kbName }}</h1>
           <p>集中管理已接入的群聊和私人聊天会话。</p>
         </div>
-        <t-button theme="primary" :disabled="!activeSource.bound" @click="accessDialogVisible = true"><template #icon><t-icon name="add" /></template>接入群聊</t-button>
+        <t-button theme="primary" :disabled="!activeSource.bound || activeSource.available === false" @click="accessDialogVisible = true"><template #icon><t-icon name="add" /></template>接入群聊</t-button>
       </header>
 
-      <div v-if="!activeSource.bound" class="wk-empty">
+      <div v-if="activeSource.available === false" class="wk-empty">
+        <t-icon name="pause" size="30px" /><h3>{{ activeSource.name }}暂未开放</h3><p>当前平台不支持采集消息。</p><t-button theme="primary" @click="$emit('profile')">查看连接器</t-button>
+      </div>
+
+      <div v-else-if="!activeSource.bound" class="wk-empty">
         <t-icon name="lock-on" size="30px" /><h3>{{ activeSource.name }}尚未绑定</h3><p>绑定连接器后才能选择该平台的会话。</p><t-button theme="primary" @click="$emit('profile')">绑定{{ activeSource.name }}</t-button>
       </div>
 
       <template v-else>
         <div class="kb-subhead">
           <div><h2>已接入会话</h2><p>选择会话后会生成对应知识空间，并可单独开启或暂停采集。</p></div>
-          <span class="kb-session-count">{{ activeSource.chats.length }} 个会话</span>
+          <span class="kb-session-count">{{ activeSource.selectedConversationCount ?? activeSource.chats.length }} 个会话</span>
         </div>
 
         <div v-if="activeSource.chats.length" class="chat-kb-grid">
@@ -109,7 +114,8 @@ const emit = defineEmits<{
   (event: 'chat', chat: InfoChat): void
   (event: 'toast', text: string): void
   (event: 'open-source', key: InfoSource['key']): void
-  (event: 'access', sourceKey: InfoSource['key'], sessionId: string): void
+  (event: 'access', sourceKey: InfoSource['key'], sessionId: string, historyStart?: string | null): void
+  (event: 'toggle', sourceKey: InfoSource['key'], sessionId: string): void
 }>()
 
 const query = ref('')
@@ -119,7 +125,7 @@ const collectDialogVisible = ref(false)
 const collectingChat = ref<InfoChat | null>(null)
 const collectStart = ref('')
 
-watch(() => props.initialSourceKey, (key) => {
+watch(() => [props.initialSourceKey, props.sources], ([key]) => {
   activeSource.value = key ? props.sources.find((source) => source.key === key) ?? null : null
 }, { immediate: true })
 
@@ -138,24 +144,19 @@ const filteredSources = computed(() => {
   })
 })
 
-function contentCount(chat: InfoChat) { return chat.messages.length + chat.files.length }
+function contentCount(chat: InfoChat) { return (chat.messageCount ?? chat.messages.length) + (chat.attachmentCount ?? chat.files.length) }
 function openSource(source: InfoSource) { activeSource.value = source; emit('open-source', source.key) }
 function statusLabel(status: CollectionStatus) { return status === 'collecting' ? '采集中' : status === 'paused' ? '已暂停' : '未开始' }
-function pauseChat(chat: InfoChat) { chat.collectionStatus = 'paused'; chat.collecting = false; chat.lastSync = '已暂停' }
+function pauseChat(chat: InfoChat) { emit('toggle', chat.source, chat.externalId || chat.id) }
 function openCollectDialog(chat: InfoChat) { collectingChat.value = chat; collectStart.value = chat.historyStart || ''; collectDialogVisible.value = true }
 function confirmCollect() {
   if (!collectingChat.value) return
-  collectingChat.value.collectionStatus = 'collecting'
-  collectingChat.value.collecting = true
-  collectingChat.value.historyStart = collectStart.value || new Date().toISOString().slice(0, 10)
-  collectingChat.value.lastSync = '刚刚开始采集'
-  collectingChat.value.recentMessageTime = '等待首条消息'
   collectDialogVisible.value = false
-  emit('toast', `已开始采集「${collectingChat.value.name}」`)
+  emit('access', collectingChat.value.source, collectingChat.value.externalId || collectingChat.value.id, collectStart.value || null)
 }
 function accessSession(sessionId: string) {
   if (!activeSource.value) return
-  emit('access', activeSource.value.key, sessionId)
+  emit('access', activeSource.value.key, sessionId, collectStart.value || null)
   accessDialogVisible.value = false
 }
 </script>

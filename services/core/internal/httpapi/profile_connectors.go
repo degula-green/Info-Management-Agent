@@ -233,12 +233,14 @@ type connectorView struct {
 }
 
 func connectorFor(ctx context.Context, pool *pgxpool.Pool, userID int64, platform string) connectorView {
+	platform = canonicalPlatform(platform)
 	labels := map[string]string{"feishu": "飞书", "wecom": "企业微信", "wechat": "个人微信"}
 	v := connectorView{Platform: platform, DisplayName: labels[platform], Availability: "available", Status: "unbound", Actions: []string{"bind"}}
 	if platform == "wecom" {
 		v.Availability, v.Actions = "coming_soon", []string{}
 		return v
 	}
+	storagePlatforms := platformStorageValues(platform)
 	var accountID int64
 	var enabled *bool
 	var selected []byte
@@ -246,10 +248,16 @@ func connectorFor(ctx context.Context, pool *pgxpool.Pool, userID int64, platfor
 	err := pool.QueryRow(ctx, `SELECT sa.id,sa.account_name,sa.last_collected_at,b.bound_at,b.enabled,b.selected_conversations,
         COALESCE(b.last_error,wr.last_error),wr.last_heartbeat
         FROM ingestion.source_accounts sa
-        LEFT JOIN ingestion.collector_bindings b ON b.source_account_id=sa.id AND b.collector_type=sa.platform
+        LEFT JOIN LATERAL (
+            SELECT bound_at,enabled,selected_conversations,last_error
+            FROM ingestion.collector_bindings b
+            WHERE b.source_account_id=sa.id AND b.collector_type=ANY($2::text[])
+            ORDER BY CASE WHEN b.collector_type=$3 THEN 0 ELSE 1 END
+            LIMIT 1
+        ) b ON true
         LEFT JOIN LATERAL (SELECT last_error,last_heartbeat FROM ingestion.worker_runs WHERE source_account_id=sa.id ORDER BY last_heartbeat DESC NULLS LAST LIMIT 1) wr ON true
-        WHERE sa.internal_account_id=$1 AND sa.platform=$2 AND sa.status='active'
-        ORDER BY sa.updated_at DESC NULLS LAST,sa.id DESC LIMIT 1`, userID, platform).
+        WHERE sa.internal_account_id=$1 AND sa.platform=ANY($2::text[]) AND sa.status='active'
+        ORDER BY CASE WHEN sa.platform=$3 THEN 0 ELSE 1 END, sa.updated_at DESC NULLS LAST,sa.id DESC LIMIT 1`, userID, storagePlatforms, platform).
 		Scan(&accountID, &v.AccountName, &v.LastSyncAt, &v.BoundAt, &enabled, &selected, &v.LastError, &heartbeat)
 	if err != nil {
 		return v
@@ -363,7 +371,7 @@ func proxyWechatConnector(c *gin.Context, cfg config.Config, path string) {
 }
 
 func unbindConnector(c *gin.Context, pool *pgxpool.Pool, cfg config.Config, redisClient *redisstore.Client) {
-	platform := c.Param("platform")
+	platform := canonicalPlatform(c.Param("platform"))
 	if platform == "wecom" {
 		apiError(c, http.StatusConflict, "connector_not_available", "WeCom is not available")
 		return
@@ -372,6 +380,7 @@ func unbindConnector(c *gin.Context, pool *pgxpool.Pool, cfg config.Config, redi
 		apiError(c, http.StatusNotFound, "connector_not_found", "connector not found")
 		return
 	}
+	storagePlatforms := platformStorageValues(platform)
 	tx, err := pool.Begin(c)
 	if err != nil {
 		apiError(c, http.StatusInternalServerError, "connector_unbind_failed", "failed to start unbind")
@@ -381,8 +390,8 @@ func unbindConnector(c *gin.Context, pool *pgxpool.Pool, cfg config.Config, redi
 	var accountID int64
 	var externalID string
 	err = tx.QueryRow(c, `SELECT id,external_account_id FROM ingestion.source_accounts
-        WHERE internal_account_id=$1 AND platform=$2 AND status='active' ORDER BY updated_at DESC NULLS LAST,id DESC LIMIT 1 FOR UPDATE`,
-		c.GetInt64("user_id"), platform).Scan(&accountID, &externalID)
+        WHERE internal_account_id=$1 AND platform=ANY($2::text[]) AND status='active' ORDER BY CASE WHEN platform=$3 THEN 0 ELSE 1 END, updated_at DESC NULLS LAST,id DESC LIMIT 1 FOR UPDATE`,
+		c.GetInt64("user_id"), storagePlatforms, platform).Scan(&accountID, &externalID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		_ = tx.Rollback(c)
 		c.JSON(http.StatusOK, connectorFor(c, pool, c.GetInt64("user_id"), platform))
@@ -392,14 +401,11 @@ func unbindConnector(c *gin.Context, pool *pgxpool.Pool, cfg config.Config, redi
 		apiError(c, http.StatusInternalServerError, "connector_unbind_failed", "failed to load connector")
 		return
 	}
-	if _, err = tx.Exec(c, `DELETE FROM ingestion.collector_bindings WHERE source_account_id=$1 AND collector_type=$2`, accountID, platform); err != nil {
-		apiError(c, http.StatusInternalServerError, "connector_unbind_failed", "failed to remove connector binding")
+	if _, err = tx.Exec(c, `UPDATE ingestion.collector_bindings SET enabled=false,updated_at=now() WHERE source_account_id=$1 AND collector_type=ANY($2::text[])`, accountID, storagePlatforms); err != nil {
+		apiError(c, http.StatusInternalServerError, "connector_unbind_failed", "failed to stop connector")
 		return
 	}
-	// Keep source_accounts as a historical parent for messages/attachments;
-	// deleting it would cascade-delete the collected data. Disabled is the
-	// schema-supported unbound state.
-	if _, err = tx.Exec(c, `UPDATE ingestion.source_accounts SET status='disabled',credential_ref=NULL,updated_at=now() WHERE id=$1`, accountID); err != nil {
+	if _, err = tx.Exec(c, `UPDATE ingestion.source_accounts SET status='inactive',updated_at=now() WHERE id=$1`, accountID); err != nil {
 		apiError(c, http.StatusInternalServerError, "connector_unbind_failed", "failed to deactivate connector")
 		return
 	}
@@ -410,11 +416,8 @@ func unbindConnector(c *gin.Context, pool *pgxpool.Pool, cfg config.Config, redi
 		apiError(c, http.StatusInternalServerError, "connector_unbind_failed", "failed to commit unbind")
 		return
 	}
-	if redisClient != nil {
-		// Clear connector credentials immediately. The WeChat collector normally
-		// uses local credentials, but deleting the namespaced key is harmless and
-		// covers deployments that persist them in Redis.
-		_ = redisClient.Delete(context.WithoutCancel(c), "credential:"+platform+":"+externalID)
+	if platform == "feishu" && redisClient != nil {
+		_ = redisClient.Delete(context.WithoutCancel(c), "credential:feishu:"+externalID)
 	}
 	if platform == "wechat" {
 		userID := c.GetInt64("user_id")

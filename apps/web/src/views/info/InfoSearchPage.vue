@@ -19,6 +19,7 @@ import ResultItem from '@/components/GlobalCommandPalette/ResultItem.vue'
 import InfoResultDrawer from '@/components/InfoResultDrawer.vue'
 import { useRouter } from 'vue-router'
 import { searchInfo } from '@/api/info-search'
+import { mapInfoSearchResult } from '@/utils/info-search-result'
 const store = useInfoMockStore(); const router = useRouter(); const query = ref(''); const platform = ref<SourceKey | 'all'>('all'); const results = ref<SearchResult[]>([]); const drawerVisible = ref(false); const selectedResult = ref<SearchResult | null>(null); const inputRef = ref<HTMLInputElement | null>(null); const loading = ref(false); const error = ref(''); const total = ref(0); const page = ref(1); const pageSize = 20
 const platformOptions = [{ label: '全部数据', value: 'all' }, { label: '飞书', value: 'feishu' }, { label: '企业微信', value: 'wecom' }, { label: '个人微信', value: 'wechat' }]
 const platformLabel = computed(() => platformOptions.find((item) => item.value === platform.value)?.label || '全部数据')
@@ -31,13 +32,7 @@ async function runSearch(nextPage: number | Event = 1) {
   try {
     const response = await searchInfo({ query: query.value.trim(), platforms: platform.value === 'all' ? [] : [platform.value], page: targetPage, page_size: pageSize }) as any
     const items = Array.isArray(response?.items) ? response.items : []
-    results.value = items.filter((item: any) => item.kind !== 'qa').map((item: any) => ({
-      id: String(item.id), kind: item.kind === 'file' ? 'file' : item.kind === 'chat' ? 'chat' : 'message',
-      title: item.title || '消息', subtitle: item.subtitle || item.content || '', source: item.platform || item.source || 'wechat',
-      platform: item.platform || item.source || 'wechat', chatId: item.conversation_id ? String(item.conversation_id) : undefined,
-      recordId: item.message_id || item.attachment_id ? String(item.message_id || item.attachment_id) : undefined,
-      content: item.content, sender: item.sender_name, time: item.occurred_at, score: item.score,
-    }))
+    results.value = items.filter((item: any) => item.kind !== 'qa').map((item: any) => mapInfoSearchResult(item))
     total.value = Number(response?.total || 0); store.addRecentSearch(query.value.trim())
   } catch (err: any) { results.value = []; total.value = 0; error.value = err?.message || '搜索服务暂不可用' }
   finally { loading.value = false }

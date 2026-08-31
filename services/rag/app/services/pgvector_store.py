@@ -10,6 +10,13 @@ except ModuleNotFoundError:  # Keep CLI help and pure tests usable without optio
     psycopg = None
 
 from app.config import settings
+from app.services.vectorization import canonical_platform
+
+
+def _canonical_source(value: Any) -> Any:
+    """Normalize platform values at the PG/RAG boundary without losing unknowns."""
+    canonical = canonical_platform(value)
+    return canonical or value
 
 
 class PgVectorStore:
@@ -65,7 +72,7 @@ class PgVectorStore:
                    LIMIT %s""",
                 (settings.processor_version, limit),
             ).fetchall()
-        return [{"id": row[0], "source": row[1], "source_account_id": row[2],
+        return [{"id": row[0], "source": _canonical_source(row[1]), "source_account_id": row[2],
                  "external_account_id": row[3], "user_id": row[4],
                  "source_message_id": row[5], "conversation_id": row[6],
                  "external_conversation_id": row[7], "sender_id": row[8],
@@ -87,7 +94,7 @@ class PgVectorStore:
                 LEFT JOIN ingestion.participants p ON p.id=m.sender_id
                 WHERE m.id=%s""", (message_id,)).fetchone()
         if not row: return None
-        return {"id": row[0], "raw_message_id": row[1], "source": row[2], "source_account_id": row[3],
+        return {"id": row[0], "raw_message_id": row[1], "source": _canonical_source(row[2]), "source_account_id": row[3],
                 "user_id": row[4], "external_account_id": row[5], "source_message_id": row[6],
                 "conversation_id": row[7], "external_conversation_id": row[8], "sender_id": row[9],
                 "external_sender_id": row[10], "text": row[11], "message_type": row[12],
@@ -112,7 +119,9 @@ class PgVectorStore:
                 if not row: return None
                 keys = ("document_id","attachment_id","message_id","platform","sender_name","conversation_name",
                         "conversation_type","sent_at","file_name","document_summary","source_position")
-                return dict(zip(keys, row))
+                result = dict(zip(keys, row))
+                result["platform"] = _canonical_source(result.get("platform"))
+                return result
             if not message_id: return None
             row = conn.execute("""SELECT m.id,m.source,COALESCE(p.display_name,''),COALESCE(c.name,''),
                         c.conversation_type,m.occurred_at
@@ -123,7 +132,9 @@ class PgVectorStore:
                     (message_id, user_id, user_id)).fetchone()
             if not row: return None
             keys = ("message_id","platform","sender_name","conversation_name","conversation_type","sent_at")
-            return dict(zip(keys, row))
+            result = dict(zip(keys, row))
+            result["platform"] = _canonical_source(result.get("platform"))
+            return result
 
     def upsert_document(self, message: dict[str, Any], source_account_id: int, raw_message_id: int, status: str, content: str) -> int:
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -165,6 +176,7 @@ class PgVectorStore:
                 "sender_id","occurred_at","message_deleted","external_account_id","account_user_id",
                 "external_conversation_id","external_sender_id")
         context = dict(zip(keys, row))
+        context["platform"] = _canonical_source(context.get("platform"))
         context["user_id"] = context["user_id"] or context["account_user_id"]
         return context
 
@@ -231,6 +243,7 @@ class PgVectorStore:
                 "conversation_id","sender_id","occurred_at","message_deleted","external_account_id","account_user_id",
                 "external_conversation_id","external_sender_id")
         result = dict(zip(keys, row))
+        result["source"] = _canonical_source(result.get("source"))
         result["user_id"] = result["user_id"] or result["account_user_id"]
         result["is_deleted"] = bool(result.pop("attachment_deleted")) or bool(result.pop("message_deleted"))
         return result
