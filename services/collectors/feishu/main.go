@@ -382,6 +382,26 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		// The chats endpoint is paginated. Without walking page_token, groups
+		// outside the first page never reach PostgreSQL and cannot be selected
+		// from the knowledge-base dialog.
+		for chats.Data.HasMore && chats.Data.PageToken != "" {
+			nextToken := chats.Data.PageToken
+			q.Set("page_token", nextToken)
+			var next page
+			if err := getWithRefresh(stopCtx, token, &stored, "/im/v1/chats", q, &next, *appID, *appSecret, *redisURL, *redisDB, "credential:feishu:"+*account); err != nil {
+				message := err.Error()
+				accountHeartbeat(context.Background(), pool, *account, "error", 0, 1, &message)
+				fmt.Fprintln(os.Stderr, err)
+				break
+			}
+			chats.Data.Items = append(chats.Data.Items, next.Data.Items...)
+			if next.Data.PageToken == nextToken {
+				break
+			}
+			chats.Data.HasMore = next.Data.HasMore
+			chats.Data.PageToken = next.Data.PageToken
+		}
 		listen, listenErr := loadListenConfig(stopCtx, pool, *account)
 		if listenErr != nil || len(listen.Selected) == 0 {
 			// Keep the selectable conversation directory fresh while the empty
@@ -462,6 +482,15 @@ func main() {
 					enrichFeishuSender(stopCtx, token, &stored, raw, profiles, *appID, *appSecret, *redisURL, *redisDB, "credential:feishu:"+*account)
 					key := *account + ":" + mid
 					if seen[key] {
+						continue
+					}
+					if obviousMessageNoise(raw) {
+						seen[key] = true
+						checkpointCtx, checkpointCancel := context.WithTimeout(context.Background(), 10*time.Second)
+						if err := saveCheckpoint(checkpointCtx, pool, *account, id, messages.Data.PageToken, mid, when); err != nil {
+							fmt.Fprintln(os.Stderr, "checkpoint filtered message:", err)
+						}
+						checkpointCancel()
 						continue
 					}
 					evaluationRaw := make(map[string]any, len(raw)+4)

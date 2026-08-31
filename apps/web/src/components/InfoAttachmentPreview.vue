@@ -1,21 +1,22 @@
 <template>
   <div class="attachment-preview">
-    <div v-if="loading" class="preview-state" role="status">
-      <t-loading size="medium" />
-      <span>正在加载源文件</span>
-    </div>
-
-    <div v-else-if="error" class="preview-state preview-state--error" role="alert">
+    <div v-if="error" class="preview-state preview-state--error" role="alert">
       <t-icon name="error-circle" />
       <strong>源文件预览失败</strong>
       <span>{{ error }}</span>
       <t-button size="small" theme="primary" variant="outline" @click="loadPreview">重试</t-button>
     </div>
 
+    <!-- Keep document render targets mounted while the async renderer is working. -->
     <div v-else-if="previewType === 'docx'" ref="docxContainer" class="preview-shell preview-docx" />
 
     <div v-else-if="previewType === 'pptx' && pptxData" class="preview-shell preview-pptx">
-      <VueOfficePptx :src="pptxData" @rendered="() => {}" @error="onPptxError" />
+      <VueOfficePptx
+        :src="pptxData"
+        :options="pptxOptions"
+        @rendered="onPptxRendered"
+        @error="onPptxError"
+      />
     </div>
 
     <iframe v-else-if="previewType === 'pdf' && blobUrl" class="pdf-preview" :src="blobUrl" :title="file.name" />
@@ -42,10 +43,15 @@
       </div>
     </div>
 
-    <div v-else class="preview-state">
+    <div v-else-if="!loading" class="preview-state">
       <t-icon name="file-unknown" />
       <strong>暂不支持在线预览</strong>
       <span>可以下载源文件后使用本地应用打开</span>
+    </div>
+
+    <div v-if="loading && !error" class="preview-state preview-state--loading" role="status">
+      <t-loading size="medium" />
+      <span>正在加载源文件</span>
     </div>
   </div>
 </template>
@@ -73,6 +79,7 @@ const textContent = ref('')
 const markdownHtml = ref('')
 const excelHtml = ref('')
 const pptxData = shallowRef<ArrayBuffer | null>(null)
+const pptxOptions = { width: 960, height: 540 }
 const docxContainer = ref<HTMLElement | null>(null)
 let loadedKey = ''
 let requestVersion = 0
@@ -235,14 +242,21 @@ async function loadPreview() {
   } catch (cause: any) {
     if (version !== requestVersion) return
     loadedKey = ''
-    error.value = cause?.message || '源文件尚未下载完成或文件存储暂不可用'
+    error.value = cause?.code === 'ECONNABORTED'
+      ? '源文件加载超时，请稍后重试或先下载文件'
+      : cause?.message || '源文件尚未下载完成或文件存储暂不可用'
   } finally {
     if (version === requestVersion) loading.value = false
   }
 }
 
 function onPptxError(event: any) {
+  loading.value = false
   error.value = event?.message || 'PPT 预览失败'
+}
+
+function onPptxRendered() {
+  loading.value = false
 }
 
 watch(
@@ -267,11 +281,22 @@ onUnmounted(() => {
 
 <style scoped lang="less">
 .attachment-preview {
+  position: relative;
   display: flex;
   width: 100%;
   min-height: 100%;
   flex-direction: column;
   align-items: center;
+}
+
+.preview-state--loading {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  width: 100%;
+  min-height: 300px;
+  background: color-mix(in srgb, var(--td-bg-color-container) 82%, transparent);
+  pointer-events: none;
 }
 
 .preview-state {
@@ -332,6 +357,7 @@ onUnmounted(() => {
 
 .preview-pptx {
   width: min(100%, 1260px);
+  min-height: 540px;
 }
 
 .preview-excel {
@@ -423,12 +449,18 @@ onUnmounted(() => {
 
 :deep(.vue-office-pptx) {
   width: 100%;
-  min-height: 100%;
+  min-height: 540px;
 }
 
 :deep(.vue-office-pptx-main) {
   width: 100%;
-  min-height: 100%;
+  min-height: 540px;
+}
+
+:deep(.pptx-preview-wrapper) {
+  max-width: 100%;
+  margin: 0 auto;
+  overflow-x: auto;
 }
 
 :deep(.excel-sheet) {

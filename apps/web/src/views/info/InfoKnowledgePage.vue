@@ -1,5 +1,5 @@
 <template>
-  <InfoKnowledgeBases :sources="store.sources" :initial-source-key="sourceKey" @profile="router.push('/profile')" @home="router.push('/knowledge')" @chat="openChat" @open-source="openSource" @access="accessSession" @toggle="pauseSession" @toast="toast" />
+  <InfoKnowledgeBases :sources="store.sources" :initial-source-key="sourceKey" :access-loading="store.loading" @profile="router.push('/profile')" @home="router.push('/knowledge')" @chat="openChat" @open-source="openSource" @access="accessSession" @toggle="pauseSession" @refresh-access="refreshAccessSessions" @toast="toast" />
 </template>
 <script setup lang="ts">
 import { computed, onMounted, watch } from 'vue'
@@ -10,6 +10,7 @@ import { normalizeSourceKey, useInfoKnowledgeStore } from '@/stores/infoKnowledg
 const route = useRoute(); const router = useRouter(); const store = useInfoKnowledgeStore(); const sourceKey = computed(() => normalizeSourceKey(String(route.params.platform)) || 'wechat')
 function openChat(chat: { source: string; id: string }) { router.push(`/knowledge/${chat.source}/conversations/${chat.id}`) }
 function openSource(key: string) { if (key !== sourceKey.value) router.push(`/knowledge/${key}`) }
+function refreshAccessSessions() { void store.refreshSources(true) }
 async function accessSession(source: 'feishu' | 'wecom' | 'wechat', sessionId: string, historyStart?: string | null) {
   const chat = await store.accessSession(source, sessionId, historyStart || null)
   if (chat) toast(`已接入「${chat.name}」`)

@@ -14,8 +14,9 @@ from wechatauto import WeChatDB
 
 from services.collectors.wechat.downloader import WeChatAttachmentDownloadWorker
 from services.collectors.wechat.attachments import WeChatAttachmentParser
-from services.collectors.wechat.repository import WeChatRepository, occurred_at
+from services.collectors.wechat.repository import WeChatRepository, conversation_display_name, display_name, occurred_at
 from services.collectors.value_judgment import MessageValueClient
+from services.collectors.message_filter import is_obvious_noise
 
 
 class BindRequest(BaseModel):
@@ -26,6 +27,34 @@ class BindRequest(BaseModel):
 class ConfigRequest(BaseModel):
     selected_conversations: list[str] = Field(default_factory=list)
     history_start_at: datetime | None = None
+
+
+def resolve_session_name(db: Any, session: dict[str, Any], chat_id: str) -> str:
+    """Resolve a current human name from the same source as wechat-python.
+
+    ``get_nickname`` reflects contact remark/nickname changes immediately,
+    while the session row may contain a stale snapshot.  Prefer it for direct
+    chats; retain explicit room titles for group conversations.
+    """
+    get_nickname = getattr(db, "get_nickname", None)
+    if get_nickname and not chat_id.lower().endswith("@chatroom"):
+        try:
+            value = display_name(get_nickname(str(chat_id)) or "", chat_id)
+            if value:
+                return value
+        except Exception:
+            pass
+    explicit = conversation_display_name(session, chat_id)
+    if explicit != chat_id:
+        return explicit
+    if get_nickname:
+        try:
+            value = display_name(get_nickname(str(chat_id)) or "", chat_id)
+            if value:
+                return value
+        except Exception:
+            pass
+    return chat_id
 
 
 class WeChatWorker:
@@ -93,9 +122,9 @@ class WeChatWorker:
             # Profile reconciliation must also run while message collection is
             # paused by an empty whitelist.
             self._backfill_participant_names(account_id)
-            # Empty whitelist deliberately pauses new collection.
-            if not selected:
-                return 0, 0
+            # An empty whitelist pauses message collection, but metadata still
+            # needs to be reconciled so names and newly discovered chats stay
+            # current in the knowledge-base directory.
         else:
             # Keep lightweight test doubles and older repository adapters
             # compatible while the persisted config migration rolls out.
@@ -108,10 +137,17 @@ class WeChatWorker:
         for session in self.db.get_sessions(limit=1000):
             chat_id = str(session.get("username") or "")
             if not chat_id: continue
-            if selected is not None and chat_id not in selected: continue
+            collect_messages = selected is None or chat_id in selected
             if chat_id in self._corrupt_chats: continue
             try:
+                # wechat-python resolves names through WeChatDB.get_nickname;
+                # use that same lookup before persisting session metadata.
+                resolved_name = resolve_session_name(self.db, session, chat_id)
+                if resolved_name:
+                    session = {**session, "display_name": resolved_name}
                 conversation_id = self.repo.upsert_conversation(account_id, session)
+                if not collect_messages:
+                    continue
                 seq = self.repo.checkpoint(account_id, conversation_id)
                 if seq is None:
                     recent = _messages_across_shards(self.db, chat_id, limit=1000)
@@ -136,6 +172,10 @@ class WeChatWorker:
                     if when and when < bound_at: continue
                     self._enrich_sender_name(raw)
                     parsed_attachments = self.attachment_parser.parse(wxid, chat_id, raw) if self.attachment_parser.is_file_message(raw) else None
+                    if is_obvious_noise(raw):
+                        last_id = f"{chat_id}:{raw.get('local_id')}"
+                        last_time = when
+                        continue
                     if self.evaluator is not None and not self.evaluator.is_valuable("wechat", {**raw, "chat_id": chat_id}):
                         last_id = f"{chat_id}:{raw.get('local_id')}"
                         last_time = when
@@ -422,15 +462,10 @@ def conversations(search: str = "", conversation_type: str = "", page: int = 1, 
     items = []
     needle = search.strip().lower()
     selected_ids = set(current().repo.get_config(worker.binding["account_id"]).get("selected_conversations", []))
-    get_nickname = getattr(worker.db, "get_nickname", None)
     for session in worker.db.get_sessions(limit=1000):
         chat_id = str(session.get("username") or "")
         kind = "group" if chat_id.endswith("@chatroom") else "direct"
-        name = str(session.get("nickname") or session.get("remark_name") or session.get("display_name") or "")
-        if not name and get_nickname:
-            try: name = str(get_nickname(chat_id) or "")
-            except Exception: name = ""
-        name = name or chat_id
+        name = resolve_session_name(worker.db, session, chat_id)
         avatar = str(session.get("avatar_url") or session.get("avatar") or session.get("head_img_url") or "")
         if conversation_type and conversation_type != kind: continue
         if needle and needle not in (chat_id + " " + name).lower(): continue

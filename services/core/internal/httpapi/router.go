@@ -64,6 +64,20 @@ func conversationMemberCount(raw []byte, fallback int) int {
 	if json.Unmarshal(raw, &value) != nil {
 		return fallback
 	}
+	// Feishu chat detail responses may expose members as an array rather than
+	// a numeric member_count field. Support both top-level and nested forms.
+	for _, key := range []string{"members", "member_list", "chat_members", "users"} {
+		if items, ok := value[key].([]any); ok && len(items) > 0 {
+			return len(items)
+		}
+	}
+	if nested, ok := value["data"].(map[string]any); ok {
+		if encoded, err := json.Marshal(nested); err == nil {
+			if count := conversationMemberCount(encoded, 0); count > 0 {
+				return count
+			}
+		}
+	}
 	for _, key := range []string{"member_count", "members_count", "chat_member_count", "participant_count", "user_count", "member_num"} {
 		v, ok := value[key]
 		if !ok {
@@ -466,7 +480,7 @@ func listKnowledgeConversationMessages(c *gin.Context, pool *pgxpool.Pool) {
 		offset = 0
 	}
 	rows, err := pool.Query(c, `SELECT m.id,m.source_message_id,m.sender_id,COALESCE(p.display_name,''),COALESCE(p.avatar_url,''),m.occurred_at,
-		m.message_type,COALESCE(m.source_message_type,''),COALESCE(m.text,''),m.is_deleted,m.is_updated,COALESCE(m.metadata,'{}'::jsonb),
+		m.message_type,COALESCE(m.source_message_type,''),COALESCE(m.text,''),m.is_deleted,m.is_updated,COALESCE(m.metadata,'{}'::jsonb)::text,
         COALESCE(d.status,'pending'),
         COALESCE((SELECT jsonb_agg(jsonb_build_object('id',a.id,'file_name',a.file_name,'extension',a.extension,'mime_type',a.mime_type,'file_category',a.file_category,'file_size',a.file_size,'parse_status',a.parse_status,'preview_capability',a.preview_capability,'is_deleted',a.is_deleted,'document_id',doc.id,'document_status',COALESCE(doc.status,''),'content',COALESCE(doc.content,'')) ORDER BY a.id)
             FROM ingestion.attachments a
@@ -476,7 +490,7 @@ func listKnowledgeConversationMessages(c *gin.Context, pool *pgxpool.Pool) {
                 WHERE d.attachment_id=a.id AND d.document_type='attachment'
                 ORDER BY d.updated_at DESC LIMIT 1
             ) doc ON true
-            WHERE a.message_id=m.id AND a.is_deleted=false),'[]'::jsonb)
+            WHERE a.message_id=m.id AND a.is_deleted=false),'[]'::jsonb)::text
         FROM ingestion.messages m
         LEFT JOIN ingestion.participants p ON p.id=m.sender_id
         LEFT JOIN LATERAL (SELECT status FROM vector_store.documents d WHERE d.raw_message_id=m.raw_message_id ORDER BY d.updated_at DESC LIMIT 1) d ON true
@@ -488,28 +502,34 @@ func listKnowledgeConversationMessages(c *gin.Context, pool *pgxpool.Pool) {
 	}
 	defer rows.Close()
 	items := make([]gin.H, 0)
+	var scanFailures int
 	for rows.Next() {
 		var messageID, sourceID string
 		var senderID *int64
 		var senderName, senderAvatar, kind, sourceKind, text, status string
 		var occurred *time.Time
 		var deleted, updated bool
-		var metadata []byte
-		var attachments []byte
+		var metadata string
+		var attachments string
 		if err := rows.Scan(&messageID, &sourceID, &senderID, &senderName, &senderAvatar, &occurred, &kind, &sourceKind, &text, &deleted, &updated, &metadata, &status, &attachments); err == nil {
 			var meta any = map[string]any{}
-			if len(metadata) > 0 {
-				_ = json.Unmarshal(metadata, &meta)
+			if metadata != "" {
+				_ = json.Unmarshal([]byte(metadata), &meta)
 			}
 			var parsedAttachments any = []any{}
-			if len(attachments) > 0 {
-				_ = json.Unmarshal(attachments, &parsedAttachments)
+			if attachments != "" {
+				_ = json.Unmarshal([]byte(attachments), &parsedAttachments)
 			}
 			items = append(items, gin.H{"id": messageID, "source_message_id": sourceID, "sender_id": senderID, "sender_name": senderName, "sender_avatar_url": senderAvatar, "occurred_at": occurred, "message_type": kind, "source_message_type": sourceKind, "text": text, "is_deleted": deleted, "is_updated": updated, "metadata": meta, "vector_status": status, "attachments": parsedAttachments})
 		} else {
+			scanFailures++
 			log.Printf("list knowledge conversation messages: scan failed for conversation %d: %v", id, err)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("list knowledge conversation messages: rows failed for conversation %d: %v", id, err)
+	}
+	log.Printf("list knowledge conversation messages: conversation=%d items=%d scan_failures=%d", id, len(items), scanFailures)
 	c.JSON(http.StatusOK, gin.H{"messages": items, "limit": limit, "offset": offset})
 }
 

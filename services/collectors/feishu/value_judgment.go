@@ -29,7 +29,7 @@ func newMessageValueClient() *messageValueClient {
 	}
 	endpoint := os.Getenv("MESSAGE_VALUE_EVALUATOR_URL")
 	if endpoint == "" {
-		endpoint = "http://127.0.0.1:8000/evaluate/message"
+		endpoint = "http://127.0.0.1:8001/evaluate/message"
 	}
 	return &messageValueClient{endpoint: endpoint, client: &http.Client{Timeout: time.Duration(timeout * float64(time.Second))}}
 }

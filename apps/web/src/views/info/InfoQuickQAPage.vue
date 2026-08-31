@@ -92,7 +92,7 @@ import { useInfoMockStore } from '@/stores/infoMock'
 import { useAuthStore } from '@/stores/auth'
 import { renderChatMarkdown } from '@/utils/chatMarkdownRenderer'
 import { sanitizeMarkdownHTML, safeMarkdownToHTML } from '@/utils/security'
-import { createQaConversation, deleteQaConversation, getQaConversation } from '@/api/qa-history'
+import { createQaConversation, getQaConversation } from '@/api/qa-history'
 
 type Scope = SourceKey | 'all'
 type Mode = 'quick' | 'deep'
@@ -320,7 +320,6 @@ watch(() => route.query.session, async (value) => {
 })
 onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', onDocumentPointerdown)
-  if (conversationId.value && messages.value.length === 0) void deleteQaConversation(conversationId.value)
 })
 </script>
 

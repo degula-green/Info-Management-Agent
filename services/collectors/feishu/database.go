@@ -164,6 +164,16 @@ func canonicalID(account, message string) string {
 }
 
 func participantDisplayName(value any) string {
+	// Sender payloads vary by event/message API version. Accept the common
+	// scalar and profile-shaped representations while keeping IDs out.
+	if profile, ok := value.(map[string]any); ok {
+		for _, key := range []string{"name", "display_name", "nickname", "en_name"} {
+			if name, ok := profile[key].(string); ok && strings.TrimSpace(name) != "" {
+				return strings.TrimSpace(name)
+			}
+		}
+		return ""
+	}
 	name, _ := value.(string)
 	return strings.TrimSpace(name)
 }
@@ -217,7 +227,9 @@ func persistMessage(ctx context.Context, pool *pgxpool.Pool, accountExternal str
 	payload, _ := json.Marshal(raw)
 	err = tx.QueryRow(ctx, `INSERT INTO ingestion.conversations (source_account_id, platform, external_conversation_id, conversation_type, name, raw_payload, last_seen_at)
 		VALUES ($1,'feishu',$2::varchar,CASE WHEN $2::text LIKE 'oc_%' THEN 'group' ELSE 'unknown' END,$3,$4,now())
-		ON CONFLICT (source_account_id, external_conversation_id) DO UPDATE SET last_seen_at=now(), raw_payload=EXCLUDED.raw_payload, updated_at=now()
+		-- Message payloads do not contain chat metadata.  Keep the payload
+		-- captured from /im/v1/chats so member counts and names remain available.
+		ON CONFLICT (source_account_id, external_conversation_id) DO UPDATE SET last_seen_at=now(), updated_at=now()
 		RETURNING id`, accountID, chatID, raw["name"], payload).Scan(&conversationID)
 	if err != nil {
 		return fmt.Errorf("upsert conversation: %w", err)
@@ -228,6 +240,14 @@ func persistMessage(ctx context.Context, pool *pgxpool.Pool, accountExternal str
 	if senderID != "" {
 		var id int64
 		senderName := participantDisplayName(sender["name"])
+		if senderName == "" {
+			for _, key := range []string{"display_name", "nickname", "en_name"} {
+				senderName = participantDisplayName(sender[key])
+				if senderName != "" {
+					break
+				}
+			}
+		}
 		senderAvatar := participantAvatarURL(sender["avatar"])
 		err = tx.QueryRow(ctx, `INSERT INTO ingestion.participants (source_account_id, external_participant_id, id_type, display_name, avatar_url, source)
 			VALUES ($1,$2,$3,NULLIF($4,''),NULLIF($5,''),'feishu') ON CONFLICT (source_account_id, external_participant_id)

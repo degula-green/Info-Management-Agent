@@ -15,7 +15,7 @@ class MessageValueClient:
 
     def __init__(self, endpoint: str | None = None, timeout: float | None = None):
         self.endpoint = (endpoint if endpoint is not None else os.getenv(
-            "MESSAGE_VALUE_EVALUATOR_URL", "http://127.0.0.1:8000/evaluate/message"
+            "MESSAGE_VALUE_EVALUATOR_URL", "http://127.0.0.1:8001/evaluate/message"
         )).strip()
         if timeout is not None:
             self.timeout = timeout

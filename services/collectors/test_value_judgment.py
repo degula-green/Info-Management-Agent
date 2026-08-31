@@ -6,9 +6,15 @@ import unittest
 from unittest.mock import patch
 
 from services.collectors.value_judgment import MessageValueClient
+from services.collectors.message_filter import is_obvious_noise
 
 
 class MessageValueClientTests(unittest.TestCase):
+    def test_reaction_only_text_is_obvious_noise(self):
+        self.assertTrue(is_obvious_noise({"type": "text", "content": "[耶]"}))
+        self.assertTrue(is_obvious_noise({"msg_type": "text", "content": "👍"}))
+        self.assertFalse(is_obvious_noise({"msg_type": "text", "content": "需要在周五前完成[耶]接口"}))
+        self.assertFalse(is_obvious_noise({"msg_type": "file", "content": "[耶]"}))
     def test_invalid_timeout_uses_default(self):
         with patch.dict(os.environ, {"MESSAGE_VALUE_TIMEOUT_SECONDS": "invalid"}):
             self.assertEqual(MessageValueClient(endpoint="").timeout, 10.0)

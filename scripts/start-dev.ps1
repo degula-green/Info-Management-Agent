@@ -115,7 +115,7 @@ Import-EnvFile (Join-Path $ragPath '.env')
 if (-not $env:COLLECTOR_DATABASE_URL -and $env:CORE_DATABASE_URL) { $env:COLLECTOR_DATABASE_URL = $env:CORE_DATABASE_URL }
 
 Start-ServiceWindow 'info-agent core :8082 (8080 occupied)' $corePath "`$env:CORE_HTTP_PORT = '8082'; & '$go' run ./cmd/server"
-Start-ServiceWindow 'info-agent rag :8000' $ragPath "`$env:PYTHONPATH = '$ragRuntime'; & '$python' -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+Start-ServiceWindow 'info-agent rag :8001' $ragPath "`$env:PYTHONPATH = '$ragRuntime'; & '$python' -m uvicorn app.main:app --host 0.0.0.0 --port 8001"
 if ($env:RAG_DATABASE_URL) {
     Start-ServiceWindow 'info-agent attachment parse worker' $ragPath "`$env:PYTHONPATH = '$ragRuntime'; & '$python' -m app.attachment_parse_main"
 } else {

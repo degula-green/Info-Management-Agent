@@ -105,7 +105,9 @@ export function getKnowledgeConversation(platform: ConnectorPlatform, id: number
 }
 
 export function getKnowledgeAttachmentContent(id: number | string, download = false) {
-  return getDown(`/api/attachments/${id}/content${download ? '?download=1' : ''}`)
+  // Large PPTX/DOCX files are streamed from remote object storage and may
+  // legitimately take longer than the normal JSON request timeout.
+  return getDown(`/api/attachments/${id}/content${download ? '?download=1' : ''}`, { timeout: 120000 })
 }
 
 export function listKnowledgeConversationMessages(platform: ConnectorPlatform, id: number | string, options: { limit?: number; offset?: number } = {}) {

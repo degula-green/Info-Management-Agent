@@ -48,7 +48,7 @@
               <small>{{ connectorSummary(connector) }}</small>
             </div>
             <t-tag :theme="connector.bound ? 'success' : 'default'" variant="light">{{ connectorStatus(connector) }}</t-tag>
-            <t-button :theme="connector.bound ? 'default' : 'primary'" :variant="connector.bound ? 'outline' : 'base'" size="small" :disabled="connector.availability !== 'available'" @click="handleConnector(connector)">
+            <t-button class="connector-action" :theme="connector.bound ? 'default' : 'primary'" :variant="connector.bound ? 'outline' : 'base'" size="medium" :disabled="connector.availability !== 'available'" @click="handleConnector(connector)">
               {{ connector.bound ? '解除绑定' : connector.availability === 'available' ? `绑定${connector.display_name}` : '暂未开放' }}
             </t-button>
           </div>
@@ -357,6 +357,15 @@ onMounted(loadPage)
 .connector-row__body strong,
 .connector-row__body small {
   display: block;
+}
+
+.connector-action {
+  width: 92px;
+  min-width: 92px;
+  height: 32px;
+  flex: 0 0 92px;
+  padding: 0 10px;
+  font-size: 12px;
 }
 
 .connector-row__body strong {

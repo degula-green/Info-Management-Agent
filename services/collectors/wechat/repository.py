@@ -52,6 +52,25 @@ def display_name(value: Any, external_id: str) -> str | None:
     return candidate
 
 
+def conversation_display_name(session: dict[str, Any], external_id: str) -> str:
+    """Resolve a human-readable WeChat conversation name.
+
+    WeChat databases often expose wxid/gh_* identifiers in ``nickname``.
+    Never persist those identifiers as the display name when a remark or
+    chat-room title is available.
+    """
+    keys = (
+        ("remark_name", "remark", "contact_remark", "alias")
+        if not external_id.endswith("@chatroom")
+        else ("chatroom_name", "room_name", "display_name", "nickname", "remark_name", "remark")
+    ) + ("nickname", "display_name")
+    for key in keys:
+        value = display_name(session.get(key), external_id)
+        if value:
+            return value
+    return external_id
+
+
 class WeChatRepository:
     def __init__(self, database_url: str):
         self.database_url = database_url
@@ -167,8 +186,10 @@ class WeChatRepository:
                 (source_account_id,platform,external_conversation_id,conversation_type,name,raw_payload,last_seen_at)
                 VALUES(%s,'wechat',%s,%s,%s,%s,now())
                 ON CONFLICT(source_account_id,external_conversation_id) DO UPDATE SET
+                name=CASE WHEN EXCLUDED.name <> EXCLUDED.external_conversation_id
+                          THEN EXCLUDED.name ELSE ingestion.conversations.name END,
                 raw_payload=EXCLUDED.raw_payload,last_seen_at=now(),updated_at=now() RETURNING id""",
-                (account_id, chat_id, kind, str(session.get("display_name") or session.get("nickname") or session.get("remark_name") or chat_id), Jsonb(session))).fetchone()
+            (account_id, chat_id, kind, conversation_display_name(session, chat_id), Jsonb(session))).fetchone()
             return int(row[0])
 
     def checkpoint(self, account_id: int, conversation_id: int) -> int | None:

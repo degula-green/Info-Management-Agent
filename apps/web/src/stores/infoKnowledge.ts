@@ -13,7 +13,7 @@ import {
   type KnowledgeConversationSummary,
 } from '@/api/info-knowledge'
 import { getConnectors, type Connector } from '@/api/info-profile'
-import { cloneMockState, type CollectionStatus, type InfoChat, type InfoFile, type InfoMessage, type InfoSource, type SourceKey } from '@/mock'
+import { type CollectionStatus, type InfoChat, type InfoFile, type InfoMessage, type InfoSource, type SourceKey } from '@/mock'
 
 const PLATFORM_ORDER: SourceKey[] = ['feishu', 'wecom', 'wechat']
 
@@ -63,6 +63,9 @@ function collectionStatus(connectorStatus?: string, selected = false): Collectio
 }
 
 function conversationSelected(conversation: KnowledgeConversationSummary, config?: IngestionConnectorConfig | null) {
+  // A disabled connector represents a paused whitelist. Do not resurrect
+  // conversations that were selected by the legacy pause implementation.
+  if (config && config.enabled === false) return false
   if (conversation.selected) return true
   return !!config?.selected_conversations?.includes(conversation.external_id)
 }
@@ -177,8 +180,9 @@ function baseSource(platform: SourceKey): InfoSource {
 }
 
 export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
-  const fallback = cloneMockState()
-  const sources = ref<InfoSource[]>(fallback.sources.map((source) => ({ ...source })))
+  // Avoid rendering stale mock conversations while the authoritative API
+  // snapshot is loading (which caused paused chats to flash after refresh).
+  const sources = ref<InfoSource[]>([])
   const loading = ref(false)
   const loadedAt = ref<number | null>(null)
   const loadError = ref<string | null>(null)
@@ -324,14 +328,18 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
 
   async function pauseConversation(platform: SourceKey, sessionId: string) {
     const current = await getIngestionConnectorConfig(platform).catch(() => null)
-    const next = current?.selected_conversations || []
+    const paused = findConversation(platform, sessionId)
+    const next = (current?.selected_conversations || []).filter((id) => String(id) !== String(sessionId))
     await updateIngestionConnectorConfig(platform, {
       selected_conversations: next,
       history_start_at: current?.history_start_at || null,
-      enabled: false,
+      // Keep the connector enabled when other sessions remain selected. An
+      // empty whitelist still pauses message collection while allowing the
+      // conversation directory to refresh.
+      enabled: next.length > 0,
     })
     await refreshSources(true)
-    return findConversation(platform, sessionId)
+    return paused
   }
 
   async function loadConversation(platform: SourceKey, conversationId: string | number, force = false) {

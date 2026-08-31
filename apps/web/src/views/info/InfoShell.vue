@@ -23,6 +23,40 @@
     <InfoCommandPalette :visible="paletteVisible" :query="paletteQuery" :results="paletteResults" :loading="paletteLoading" :recent-searches="store.recentSearches" @update:visible="paletteVisible = $event" @search="runPaletteSearch" @select="selectPaletteResult" />
     <InfoResultDrawer v-model:visible="drawerVisible" :result="drawerResult" @toast="toast" @save="saveDrawerResult" />
     <t-dialog v-model:visible="toastDialogVisible" header="提示" :footer="false" width="360px"><p class="info-toast-dialog">{{ toastText }}</p></t-dialog>
+    <t-dialog
+      v-model:visible="renameDialogVisible"
+      header="重命名会话"
+      width="420px"
+      :confirm-btn="{ content: '保存', loading: qaDialogSubmitting, disabled: !renameTitle.trim() }"
+      :cancel-btn="{ content: '取消', disabled: qaDialogSubmitting }"
+      :close-btn="!qaDialogSubmitting"
+      @confirm="confirmRenameQaSession"
+    >
+      <div class="qa-dialog">
+        <p>修改后的名称会同步显示在历史会话列表中。</p>
+        <t-input
+          v-model="renameTitle"
+          autofocus
+          clearable
+          maxlength="60"
+          placeholder="请输入会话名称"
+          @keydown.enter.prevent="confirmRenameQaSession"
+        />
+      </div>
+    </t-dialog>
+    <t-dialog
+      v-model:visible="deleteDialogVisible"
+      header="删除历史会话"
+      width="420px"
+      :confirm-btn="{ content: '删除', theme: 'danger', loading: qaDialogSubmitting }"
+      :cancel-btn="{ content: '取消', disabled: qaDialogSubmitting }"
+      :close-btn="!qaDialogSubmitting"
+      @confirm="confirmDeleteQaSession"
+    >
+      <div class="qa-dialog qa-dialog--danger">
+        <p>删除后将无法恢复这条问答历史，确认继续吗？</p>
+      </div>
+    </t-dialog>
     <t-dialog v-model:visible="protocolDialogVisible" :header="protocolTitle" :footer="false" width="520px">
       <div class="protocol-dialog">
         <p>{{ protocolText }}</p>
@@ -54,8 +88,17 @@ const sidebarNickname = ref('')
 const sidebarAvatar = ref('')
 const sidebarAvatarUrl = ref<string | null>(null)
 const qaConversations = ref<QaConversation[]>([])
+const renameDialogVisible = ref(false)
+const renameSessionId = ref('')
+const renameTitle = ref('')
+const deleteDialogVisible = ref(false)
+const deleteSessionId = ref('')
+const qaDialogSubmitting = ref(false)
 async function refreshQaConversations() {
-  try { qaConversations.value = (await listQaConversations()).items || [] } catch { qaConversations.value = [] }
+  try { qaConversations.value = (await listQaConversations()).items || [] } catch {
+    // Keep the last successful list during transient route/API failures.
+    // Clearing it here makes persisted history look deleted until the next refresh.
+  }
 }
 onMounted(async () => {
   try {
@@ -106,8 +149,50 @@ function handleUserMenuAction(action: 'profile' | 'terms' | 'privacy' | 'logout'
   store.logout(); router.push('/login')
 }
 function openQaSession(id: string) { router.push({ path: '/chat', query: { session: id } }) }
-async function renameQaSession(id: string) { const current = qaConversations.value.find((item) => String(item.id) === id); const title = window.prompt('请输入会话名称', current?.title || ''); if (!title?.trim()) return; try { const updated = await renameQaConversation(id, title.trim()); if (current) current.title = updated.title } catch { MessagePlugin.error('重命名失败') } }
-async function deleteQaSession(id: string) { if (!window.confirm('确定删除这条问答历史吗？')) return; try { await deleteQaConversation(id); qaConversations.value = qaConversations.value.filter((item) => String(item.id) !== id); if (route.query.session === id) router.push('/chat') } catch { MessagePlugin.error('删除历史失败') } }
+function renameQaSession(id: string) {
+  const current = qaConversations.value.find((item) => String(item.id) === id)
+  if (!current) { MessagePlugin.error('未找到该历史会话'); return }
+  renameSessionId.value = id
+  renameTitle.value = current.title || ''
+  renameDialogVisible.value = true
+}
+async function confirmRenameQaSession() {
+  const title = renameTitle.value.trim()
+  if (!title || !renameSessionId.value || qaDialogSubmitting.value) return
+  qaDialogSubmitting.value = true
+  try {
+    const updated = await renameQaConversation(renameSessionId.value, title)
+    const current = qaConversations.value.find((item) => String(item.id) === renameSessionId.value)
+    if (current) current.title = updated.title
+    renameDialogVisible.value = false
+    MessagePlugin.success('会话名称已更新')
+  } catch {
+    MessagePlugin.error('重命名失败')
+  } finally {
+    qaDialogSubmitting.value = false
+  }
+}
+function deleteQaSession(id: string) {
+  if (!qaConversations.value.some((item) => String(item.id) === id)) { MessagePlugin.error('未找到该历史会话'); return }
+  deleteSessionId.value = id
+  deleteDialogVisible.value = true
+}
+async function confirmDeleteQaSession() {
+  const id = deleteSessionId.value
+  if (!id || qaDialogSubmitting.value) return
+  qaDialogSubmitting.value = true
+  try {
+    await deleteQaConversation(id)
+    qaConversations.value = qaConversations.value.filter((item) => String(item.id) !== id)
+    deleteDialogVisible.value = false
+    if (String(route.query.session || '') === id) await router.push('/chat')
+    MessagePlugin.success('历史会话已删除')
+  } catch {
+    MessagePlugin.error('删除历史失败')
+  } finally {
+    qaDialogSubmitting.value = false
+  }
+}
 function openSearch() { paletteQuery.value = ''; paletteResults.value = []; paletteVisible.value = true }
 function runPaletteSearch(query: string, committed = false) {
   paletteQuery.value = query
@@ -143,6 +228,6 @@ function toast(text: string) { MessagePlugin.success(text) }
 .info-shell__header { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 62px; padding: 0 28px; border-bottom: 1px solid var(--td-component-stroke); background: var(--td-bg-color-container); }
 .info-shell__crumb { display: flex; align-items: center; gap: 9px; min-width: 0; font-size: 14px; }.info-shell__product { color: var(--td-brand-color); font-weight: 700; }.info-shell__slash { color: var(--td-text-color-placeholder); }.info-shell__crumb strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .info-shell__search { display: flex; align-items: center; gap: 9px; width: min(360px, 42vw); padding: 8px 10px; border: 1px solid var(--td-component-stroke); border-radius: 6px; color: var(--td-text-color-placeholder); background: var(--td-bg-color-page); text-align: left; font-size: 12px; cursor: pointer; }.info-shell__search:hover { border-color: var(--td-brand-color); color: var(--td-text-color-secondary); }.info-shell__search span { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }.info-shell__search kbd { padding: 2px 5px; border: 1px solid var(--td-component-stroke); border-radius: 3px; font-size: 10px; }
-.info-shell__content { flex: 1; min-height: 0; overflow: auto; }.info-toast-dialog { margin: 0; color: var(--td-text-color-secondary); }.protocol-dialog { color: var(--td-text-color-secondary); font-size: 13px; line-height: 1.8; }.protocol-dialog p { margin: 0; }.protocol-dialog__updated { margin-top: 14px !important; color: var(--td-text-color-placeholder); font-size: 12px; }
+.info-shell__content { flex: 1; min-height: 0; overflow: auto; }.info-toast-dialog { margin: 0; color: var(--td-text-color-secondary); }.qa-dialog p { margin: 0 0 16px; color: var(--td-text-color-secondary); font-size: 13px; line-height: 1.65; }.qa-dialog--danger p { margin-bottom: 0; color: var(--td-text-color-primary); }.protocol-dialog { color: var(--td-text-color-secondary); font-size: 13px; line-height: 1.8; }.protocol-dialog p { margin: 0; }.protocol-dialog__updated { margin-top: 14px !important; color: var(--td-text-color-placeholder); font-size: 12px; }
 @media (max-width: 760px) { .info-shell { min-width: 0; }.info-shell__header { padding: 0 16px; }.info-shell__search { width: 40px; padding: 8px; }.info-shell__search span, .info-shell__search kbd { display: none; }.info-shell__search svg { margin: auto; } }
 </style>
