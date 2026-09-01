@@ -203,7 +203,7 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
     return source.chats.find((item) => String(item.id) === String(id) || String(item.externalId) === String(id))
   }
 
-  async function refreshSources(force = false): Promise<InfoSource[]> {
+  async function refreshSources(force = false, onlyPlatform?: SourceKey): Promise<InfoSource[]> {
     // A forced refresh may be requested by both the shell and the detail page
     // at the same time. Share the active request so a slower duplicate cannot
     // replace the store with an older summary snapshot.
@@ -228,6 +228,14 @@ export const useInfoKnowledgeStore = defineStore('infoKnowledge', () => {
         const loaded: InfoSource[] = []
 
         for (const platform of PLATFORM_ORDER) {
+          // Explicit directory refreshes are scoped to the active platform.
+          // Keep the other platform snapshots untouched instead of issuing
+          // unnecessary conversation-list requests for them.
+          if (onlyPlatform && platform !== onlyPlatform) {
+            const previous = previousSources.get(platform)
+            if (previous) loaded.push(previous)
+            continue
+          }
           const meta = PLATFORM_META[platform]
           const kb = kbMap.get(platform)
           const connector = connectorMap.get(platform)

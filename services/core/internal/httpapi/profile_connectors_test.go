@@ -2,6 +2,9 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -33,5 +36,44 @@ func TestConnectorRedirectUsesConfiguredWebBaseURL(t *testing.T) {
 	got := connectorRedirect(config.Config{WebBaseURL: "https://app.example.test/"}, "/profile", url.Values{"status": {"bound"}})
 	if got != "https://app.example.test/profile?status=bound" {
 		t.Fatalf("unexpected redirect: %s", got)
+	}
+}
+
+func TestStopWechatCollectorRejectsNonSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	if err := stopWechatCollector(context.Background(), config.Config{WechatCollectorURL: server.URL}, 42); err == nil {
+		t.Fatal("expected non-success collector response to fail")
+	}
+}
+
+func TestStopWechatCollectorSendsInternalIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/stop" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("X-Info-Agent-User-ID"); got != "42" {
+			t.Fatalf("unexpected user header: %q", got)
+		}
+		if got := r.Header.Get("X-Info-Agent-Collector-Token"); got != "internal-token" {
+			t.Fatalf("unexpected collector token header: %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	if err := stopWechatCollector(context.Background(), config.Config{WechatCollectorURL: server.URL, CollectorToken: "internal-token"}, 42); err != nil {
+		t.Fatalf("stopWechatCollector returned error: %v", err)
+	}
+}
+
+func TestWechatConnectorErrorMessageLocalizesPathErrors(t *testing.T) {
+	got := wechatConnectorErrorMessage("db_dir must be an existing local absolute path")
+	if got != "本机微信数据目录不存在或不是绝对路径" {
+		t.Fatalf("unexpected localized error: %q", got)
+	}
+	if got := wechatConnectorErrorMessage("custom collector error"); got != "custom collector error" {
+		t.Fatalf("unexpected custom error: %q", got)
 	}
 }

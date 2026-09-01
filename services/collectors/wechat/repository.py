@@ -123,7 +123,7 @@ class WeChatRepository:
                 conn.execute("""UPDATE ingestion.collector_bindings b SET enabled=false,updated_at=now()
                     FROM ingestion.source_accounts sa WHERE b.source_account_id=sa.id
                     AND sa.internal_account_id=%s AND sa.platform='wechat'""", (internal_account_id,))
-                conn.execute("UPDATE ingestion.source_accounts SET status='inactive',updated_at=now() WHERE internal_account_id=%s AND platform='wechat'", (internal_account_id,))
+                conn.execute("UPDATE ingestion.source_accounts SET status='disabled',updated_at=now() WHERE internal_account_id=%s AND platform='wechat'", (internal_account_id,))
             if existing:
                 account_id = int(existing[0])
                 conn.execute("""UPDATE ingestion.source_accounts SET account_name=%s,credential_ref=%s,status='active',updated_at=now()

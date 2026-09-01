@@ -117,7 +117,11 @@ onMounted(async () => {
 watch(() => route.fullPath, () => { void refreshQaConversations() })
 const knowledgePollTimer = ref<number | null>(null)
 onMounted(() => {
-  knowledgePollTimer.value = window.setInterval(() => { void knowledgeStore.ensureSources(true) }, 30000)
+  // Keep the knowledge directory stable while navigating. A forced periodic
+  // refresh can replace a complete snapshot with a partial page and make
+  // conversations appear/disappear. Explicit refresh actions still call
+  // refreshSources(true).
+  knowledgePollTimer.value = window.setInterval(() => { void knowledgeStore.ensureSources() }, 30000)
 })
 onBeforeUnmount(() => {
   if (knowledgePollTimer.value != null) window.clearInterval(knowledgePollTimer.value)

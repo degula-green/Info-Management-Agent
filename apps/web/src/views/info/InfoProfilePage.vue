@@ -48,8 +48,8 @@
               <small>{{ connectorSummary(connector) }}</small>
             </div>
             <t-tag :theme="connector.bound ? 'success' : 'default'" variant="light">{{ connectorStatus(connector) }}</t-tag>
-            <t-button class="connector-action" :theme="connector.bound ? 'default' : 'primary'" :variant="connector.bound ? 'outline' : 'base'" size="medium" :disabled="connector.availability !== 'available'" @click="handleConnector(connector)">
-              {{ connector.bound ? '解除绑定' : connector.availability === 'available' ? `绑定${connector.display_name}` : '暂未开放' }}
+            <t-button class="connector-action" :theme="connector.bound || connector.cleanup_pending ? 'default' : 'primary'" :variant="connector.bound || connector.cleanup_pending ? 'outline' : 'base'" size="medium" :loading="connectorPending[connector.platform]" :disabled="connector.availability !== 'available' || connectorPending[connector.platform]" @click="handleConnector(connector)">
+              {{ connector.cleanup_pending ? '重试解绑' : connector.bound ? '解除绑定' : connector.availability === 'available' ? `绑定${connector.display_name}` : '暂未开放' }}
             </t-button>
           </div>
         </div>
@@ -63,7 +63,7 @@
       </t-button>
     </div>
 
-    <t-dialog v-model:visible="feishuDialogVisible" header="绑定飞书" :confirm-btn="'前往飞书授权'" :cancel-btn="'取消'" @confirm="confirmFeishuBind">
+    <t-dialog v-model:visible="feishuDialogVisible" header="绑定飞书" :confirm-btn="'前往飞书授权'" :cancel-btn="'取消'" :confirm-loading="feishuBinding" @confirm="confirmFeishuBind">
       <div class="auth-dialog">
         <div class="auth-dialog__icon" :style="{ background: sourceColor.feishu }">飞</div>
         <h3>授权飞书连接器</h3>
@@ -75,7 +75,7 @@
         </div>
       </div>
     </t-dialog>
-    <t-dialog v-model:visible="wechatDialogVisible" header="绑定个人微信" :confirm-btn="'确认绑定'" :cancel-btn="'取消'" @confirm="confirmWechatBind">
+    <t-dialog v-model:visible="wechatDialogVisible" header="绑定个人微信" :confirm-btn="'确认绑定'" :cancel-btn="'取消'" :confirm-loading="wechatBinding" @confirm="confirmWechatBind">
       <t-form :data="wechatForm" label-align="top">
         <t-form-item label="微信 ID"><t-input v-model="wechatForm.wxid" placeholder="例如 wxid_xxx" /></t-form-item>
         <t-form-item label="本机微信数据目录"><t-input v-model="wechatForm.db_dir" placeholder="仅本机开发环境可用" /></t-form-item>
@@ -89,7 +89,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { sourceColor } from '@/mock'
 import { useInfoMockStore } from '@/stores/infoMock'
-import { bindWechat, getConnectors, getFeishuAuthorizeURL, getProfile, type Connector, type Profile, unbindConnector, updateProfile, uploadAvatar } from '@/api/info-profile'
+import { bindWechat, getConnectors, getFeishuAuthorizeURL, getProfile, type Connector, type ConnectorPlatform, type Profile, unbindConnector, updateProfile, uploadAvatar } from '@/api/info-profile'
 
 const store = useInfoMockStore()
 const profile = ref<Profile>({ id: 0, username: '', nickname: store.profile.nickname, email: store.profile.email, avatar_url: null, updated_at: '' })
@@ -100,6 +100,9 @@ const feishuDialogVisible = ref(false)
 const wechatDialogVisible = ref(false)
 const wechatRebind = ref(false)
 const wechatForm = reactive({ wxid: '', db_dir: '' })
+const connectorPending = reactive<Record<ConnectorPlatform, boolean>>({ feishu: false, wecom: false, wechat: false })
+const feishuBinding = ref(false)
+const wechatBinding = ref(false)
 const avatarLabel = computed(() => (form.nickname.trim().slice(0, 1) || '我'))
 
 function errorMessage(cause: any, fallback: string) { return cause?.message || cause?.error?.message || fallback }
@@ -128,35 +131,60 @@ async function onAvatarSelected(event: Event) {
 }
 function connectorStatus(connector: Connector) {
   if (connector.availability !== 'available') return '暂未开放'
+  if (connector.cleanup_pending) return '待完成解绑'
   return ({ unbound: '未绑定', active: '已绑定', paused: '已暂停', error: '异常', offline: '离线' } as Record<string, string>)[connector.status]
 }
 function connectorSummary(connector: Connector) {
   if (connector.availability !== 'available') return '该连接器暂未开放'
+  if (connector.cleanup_pending) return connector.last_error === 'wechat_stop_failed' ? '采集器尚未停止，请重试解绑' : '认证凭据尚未清理，请重试解绑'
   if (!connector.bound) return `未绑定，绑定后开放${connector.display_name}知识库`
   return connector.account_name || '已绑定，等待同步账号信息'
 }
 async function refreshConnectors() { connectors.value = await getConnectors() }
 async function handleConnector(connector: Connector) {
-  if (connector.bound) {
+  if (connectorPending[connector.platform]) return
+  if (connector.bound || connector.cleanup_pending) {
+    connectorPending[connector.platform] = true
     try { await unbindConnector(connector.platform); await refreshConnectors(); MessagePlugin.success(`已解除${connector.display_name}绑定`) }
-    catch (cause) { MessagePlugin.error(errorMessage(cause, '解除绑定失败')) }
+    catch (cause) {
+      await refreshConnectors().catch(() => undefined)
+      MessagePlugin.error(errorMessage(cause, '解除绑定失败，请重试'))
+    }
+    finally { connectorPending[connector.platform] = false }
     return
   }
   if (connector.platform === 'feishu') feishuDialogVisible.value = true
   if (connector.platform === 'wechat') { wechatRebind.value = false; wechatForm.wxid = ''; wechatForm.db_dir = ''; wechatDialogVisible.value = true }
 }
 async function confirmFeishuBind() {
+  if (feishuBinding.value) return
+  feishuBinding.value = true
   try { window.location.assign(await getFeishuAuthorizeURL('bind')) }
-  catch (cause) { MessagePlugin.error(errorMessage(cause, '飞书授权暂不可用')) }
+  catch (cause) { feishuBinding.value = false; MessagePlugin.error(errorMessage(cause, '飞书授权暂不可用')) }
+}
+function isAbsoluteLocalPath(value: string) { return /^(?:[a-zA-Z]:[\\/]|\\\\|\/)/.test(value.trim()) }
+function normalizedWechatBinding() {
+  const wxid = wechatForm.wxid.trim()
+  const dbDir = wechatForm.db_dir.trim()
+  if (!wxid || !dbDir) { MessagePlugin.warning('请填写微信 ID 和本机微信数据目录'); return null }
+  if (isAbsoluteLocalPath(wxid) || !isAbsoluteLocalPath(dbDir)) {
+    MessagePlugin.warning('未找到本地微信数据库，请检查微信 ID 和数据目录')
+    return null
+  }
+  return { wxid, db_dir: dbDir }
 }
 async function confirmWechatBind() {
-  if (!wechatForm.wxid.trim() || !wechatForm.db_dir.trim()) { MessagePlugin.warning('请填写微信 ID 和本机微信数据目录'); return }
+  if (wechatBinding.value) return
+  const input = normalizedWechatBinding()
+  if (!input) return
+  wechatBinding.value = true
   try {
-    await bindWechat({ wxid: wechatForm.wxid.trim(), db_dir: wechatForm.db_dir.trim() }, wechatRebind.value)
+    await bindWechat(input, wechatRebind.value)
     wechatDialogVisible.value = false
     await refreshConnectors()
     MessagePlugin.success('个人微信已绑定')
   } catch (cause) { MessagePlugin.error(errorMessage(cause, '个人微信绑定失败')) }
+  finally { wechatBinding.value = false }
 }
 onMounted(loadPage)
 </script>

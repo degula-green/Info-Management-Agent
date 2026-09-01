@@ -131,7 +131,7 @@ if ($env:COLLECTOR_DATABASE_URL) {
 } else {
     Write-Warning 'COLLECTOR_DATABASE_URL is missing; Feishu collector was skipped.'
 }
-Start-ServiceWindow 'info-agent web :5174' $webPath "& '$npm' run dev -- --host 0.0.0.0"
+Start-ServiceWindow 'info-agent web :5173' $webPath "& '$npm' run dev -- --host 0.0.0.0"
 
 if ($nginx) {
     New-Item -ItemType Directory -Force -Path (Join-Path $nginxRuntime 'conf.d') | Out-Null
@@ -144,10 +144,10 @@ if ($nginx) {
 } else {
     Write-Warning 'nginx not found. Core, RAG and Web were started; gateway was skipped.'
     Write-Host 'Install nginx and add it to PATH, then run this file again.'
-    Write-Host 'Web profile URL (without gateway): http://localhost:5174/profile'
+    Write-Host 'Web profile URL (without gateway): http://localhost:5173/profile'
 }
 
 Write-Host 'Core: http://localhost:8080/health'
 Write-Host 'RAG:  http://localhost:8000/health'
-Write-Host 'Web:  http://localhost:5174'
+Write-Host 'Web:  http://localhost:5173'
 Read-Host 'Press Enter to close this launcher'

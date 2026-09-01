@@ -222,6 +222,7 @@ type connectorView struct {
 	DisplayName               string     `json:"display_name"`
 	Availability              string     `json:"availability"`
 	Bound                     bool       `json:"bound"`
+	CleanupPending            bool       `json:"cleanup_pending"`
 	Status                    string     `json:"status"`
 	AccountName               *string    `json:"account_name"`
 	AccountAvatarURL          *string    `json:"account_avatar_url"`
@@ -231,6 +232,11 @@ type connectorView struct {
 	LastError                 *string    `json:"last_error"`
 	Actions                   []string   `json:"actions"`
 }
+
+const (
+	credentialCleanupFailed = "credential_cleanup_failed"
+	wechatStopFailed        = "wechat_stop_failed"
+)
 
 func connectorFor(ctx context.Context, pool *pgxpool.Pool, userID int64, platform string) connectorView {
 	platform = canonicalPlatform(platform)
@@ -245,7 +251,8 @@ func connectorFor(ctx context.Context, pool *pgxpool.Pool, userID int64, platfor
 	var enabled *bool
 	var selected []byte
 	var heartbeat *time.Time
-	err := pool.QueryRow(ctx, `SELECT sa.id,sa.account_name,sa.last_collected_at,b.bound_at,b.enabled,b.selected_conversations,
+	var accountStatus string
+	err := pool.QueryRow(ctx, `SELECT sa.id,sa.status,sa.account_name,sa.last_collected_at,b.bound_at,b.enabled,b.selected_conversations,
         COALESCE(b.last_error,wr.last_error),wr.last_heartbeat
         FROM ingestion.source_accounts sa
         LEFT JOIN LATERAL (
@@ -256,10 +263,21 @@ func connectorFor(ctx context.Context, pool *pgxpool.Pool, userID int64, platfor
             LIMIT 1
         ) b ON true
         LEFT JOIN LATERAL (SELECT last_error,last_heartbeat FROM ingestion.worker_runs WHERE source_account_id=sa.id ORDER BY last_heartbeat DESC NULLS LAST LIMIT 1) wr ON true
-        WHERE sa.internal_account_id=$1 AND sa.platform=ANY($2::text[]) AND sa.status='active'
-        ORDER BY CASE WHEN sa.platform=$3 THEN 0 ELSE 1 END, sa.updated_at DESC NULLS LAST,sa.id DESC LIMIT 1`, userID, storagePlatforms, platform).
-		Scan(&accountID, &v.AccountName, &v.LastSyncAt, &v.BoundAt, &enabled, &selected, &v.LastError, &heartbeat)
+		WHERE sa.internal_account_id=$1 AND sa.platform=ANY($2::text[])
+		          AND (sa.status='active' OR (sa.status='disabled' AND EXISTS (
+              SELECT 1 FROM ingestion.collector_bindings pending
+              WHERE pending.source_account_id=sa.id
+                AND pending.last_error=ANY($4::text[])
+          )))
+		ORDER BY CASE WHEN sa.platform=$3 THEN 0 ELSE 1 END, sa.updated_at DESC NULLS LAST,sa.id DESC LIMIT 1`, userID, storagePlatforms, platform, []string{credentialCleanupFailed, wechatStopFailed}).
+		Scan(&accountID, &accountStatus, &v.AccountName, &v.LastSyncAt, &v.BoundAt, &enabled, &selected, &v.LastError, &heartbeat)
 	if err != nil {
+		return v
+	}
+	if accountStatus == "disabled" {
+		v.CleanupPending = true
+		v.Status = "error"
+		v.Actions = []string{"unbind"}
 		return v
 	}
 	v.Bound = true
@@ -364,10 +382,50 @@ func proxyWechatConnector(c *gin.Context, cfg config.Config, path string) {
 		if strings.Contains(strings.ToLower(detail.Detail), "another user") {
 			code = "connector_owned_by_another_user"
 		}
-		apiError(c, resp.StatusCode, code, strings.TrimSpace(detail.Detail))
+		apiError(c, resp.StatusCode, code, wechatConnectorErrorMessage(detail.Detail))
 		return
 	}
 	c.Data(resp.StatusCode, "application/json", data)
+}
+
+func wechatConnectorErrorMessage(detail string) string {
+	detail = strings.TrimSpace(detail)
+	switch {
+	case strings.Contains(detail, "db_dir must be an existing local absolute path"):
+		return "本机微信数据目录不存在或不是绝对路径"
+	case strings.Contains(detail, "database file must be located below"):
+		return "所选数据库文件不在微信账号的 db_storage 目录下"
+	case strings.Contains(detail, "db_dir must point to a directory or a database file"):
+		return "本机微信数据目录必须指向目录或数据库文件"
+	case strings.Contains(detail, "db_dir must contain exactly one WeChat account directory"):
+		return "目录中存在多个微信账号，请选择对应账号目录或填写匹配的微信 ID"
+	case strings.Contains(detail, "db_dir does not contain a readable WeChat db_storage directory"):
+		return "目录中未找到可读取的微信 db_storage 数据"
+	case detail == "":
+		return "个人微信连接器请求失败"
+	default:
+		return detail
+	}
+}
+
+func stopWechatCollector(ctx context.Context, cfg config.Config, userID int64) error {
+	requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, strings.TrimRight(cfg.WechatCollectorURL, "/")+"/stop", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Info-Agent-User-ID", fmt.Sprint(userID))
+	req.Header.Set("X-Info-Agent-Collector-Token", cfg.CollectorToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("wechat collector stop returned HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func unbindConnector(c *gin.Context, pool *pgxpool.Pool, cfg config.Config, redisClient *redisstore.Client) {
@@ -381,6 +439,10 @@ func unbindConnector(c *gin.Context, pool *pgxpool.Pool, cfg config.Config, redi
 		return
 	}
 	storagePlatforms := platformStorageValues(platform)
+	cleanupCode := credentialCleanupFailed
+	if platform == "wechat" {
+		cleanupCode = wechatStopFailed
+	}
 	tx, err := pool.Begin(c)
 	if err != nil {
 		apiError(c, http.StatusInternalServerError, "connector_unbind_failed", "failed to start unbind")
@@ -389,9 +451,16 @@ func unbindConnector(c *gin.Context, pool *pgxpool.Pool, cfg config.Config, redi
 	defer tx.Rollback(c)
 	var accountID int64
 	var externalID string
-	err = tx.QueryRow(c, `SELECT id,external_account_id FROM ingestion.source_accounts
-        WHERE internal_account_id=$1 AND platform=ANY($2::text[]) AND status='active' ORDER BY CASE WHEN platform=$3 THEN 0 ELSE 1 END, updated_at DESC NULLS LAST,id DESC LIMIT 1 FOR UPDATE`,
-		c.GetInt64("user_id"), storagePlatforms, platform).Scan(&accountID, &externalID)
+	err = tx.QueryRow(c, `SELECT sa.id,sa.external_account_id FROM ingestion.source_accounts sa
+        WHERE sa.internal_account_id=$1 AND sa.platform=ANY($2::text[])
+          AND (sa.status='active' OR (sa.status='disabled' AND EXISTS (
+              SELECT 1 FROM ingestion.collector_bindings pending
+              WHERE pending.source_account_id=sa.id
+                AND pending.collector_type=ANY($2::text[])
+                AND pending.last_error=ANY($4::text[])
+          )))
+        ORDER BY CASE WHEN sa.platform=$3 THEN 0 ELSE 1 END, sa.updated_at DESC NULLS LAST,sa.id DESC LIMIT 1 FOR UPDATE OF sa`,
+		c.GetInt64("user_id"), storagePlatforms, platform, []string{credentialCleanupFailed, wechatStopFailed}).Scan(&accountID, &externalID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		_ = tx.Rollback(c)
 		c.JSON(http.StatusOK, connectorFor(c, pool, c.GetInt64("user_id"), platform))
@@ -401,35 +470,51 @@ func unbindConnector(c *gin.Context, pool *pgxpool.Pool, cfg config.Config, redi
 		apiError(c, http.StatusInternalServerError, "connector_unbind_failed", "failed to load connector")
 		return
 	}
-	if _, err = tx.Exec(c, `UPDATE ingestion.collector_bindings SET enabled=false,updated_at=now() WHERE source_account_id=$1 AND collector_type=ANY($2::text[])`, accountID, storagePlatforms); err != nil {
+	result, err := tx.Exec(c, `UPDATE ingestion.collector_bindings SET enabled=false,last_error=$1,updated_at=now() WHERE source_account_id=$2 AND collector_type=ANY($3::text[])`, cleanupCode, accountID, storagePlatforms)
+	if err != nil || result.RowsAffected() == 0 {
 		apiError(c, http.StatusInternalServerError, "connector_unbind_failed", "failed to stop connector")
 		return
 	}
-	if _, err = tx.Exec(c, `UPDATE ingestion.source_accounts SET status='inactive',updated_at=now() WHERE id=$1`, accountID); err != nil {
+	if _, err = tx.Exec(c, `UPDATE ingestion.source_accounts SET status='disabled',updated_at=now() WHERE id=$1`, accountID); err != nil {
 		apiError(c, http.StatusInternalServerError, "connector_unbind_failed", "failed to deactivate connector")
 		return
 	}
 	if platform == "feishu" {
-		_, _ = tx.Exec(c, `UPDATE identity.users SET feishu_open_id=NULL,feishu_name=NULL,feishu_avatar=NULL,updated_at=now() WHERE id=$1`, c.GetInt64("user_id"))
+		if _, err = tx.Exec(c, `UPDATE identity.users SET feishu_open_id=NULL,feishu_name=NULL,feishu_avatar=NULL,updated_at=now() WHERE id=$1`, c.GetInt64("user_id")); err != nil {
+			apiError(c, http.StatusInternalServerError, "connector_unbind_failed", "failed to clear connector profile")
+			return
+		}
 	}
 	if err = tx.Commit(c); err != nil {
 		apiError(c, http.StatusInternalServerError, "connector_unbind_failed", "failed to commit unbind")
 		return
 	}
-	if platform == "feishu" && redisClient != nil {
-		_ = redisClient.Delete(context.WithoutCancel(c), "credential:feishu:"+externalID)
+	var cleanupErr error
+	if platform == "feishu" {
+		if redisClient == nil {
+			cleanupErr = errors.New("redis client is not configured")
+		} else {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(c), 10*time.Second)
+			cleanupErr = redisClient.Delete(cleanupCtx, "credential:feishu:"+externalID)
+			cancel()
+		}
+	} else if platform == "wechat" {
+		cleanupErr = stopWechatCollector(c, cfg, c.GetInt64("user_id"))
 	}
-	if platform == "wechat" {
-		userID := c.GetInt64("user_id")
-		go func() {
-			req, _ := http.NewRequest(http.MethodPost, strings.TrimRight(cfg.WechatCollectorURL, "/")+"/stop", nil)
-			req.Header.Set("X-Info-Agent-User-ID", fmt.Sprint(userID))
-			req.Header.Set("X-Info-Agent-Collector-Token", cfg.CollectorToken)
-			resp, e := http.DefaultClient.Do(req)
-			if e == nil {
-				resp.Body.Close()
-			}
-		}()
+	if cleanupErr != nil {
+		if platform == "feishu" {
+			log.Printf("connector cleanup failed: platform=%s user_id=%d source_account_id=%d redis_key=%s code=%s: %v", platform, c.GetInt64("user_id"), accountID, "credential:feishu:"+externalID, cleanupCode, cleanupErr)
+		} else {
+			log.Printf("connector cleanup failed: platform=%s user_id=%d source_account_id=%d code=%s: %v", platform, c.GetInt64("user_id"), accountID, cleanupCode, cleanupErr)
+		}
+		apiError(c, http.StatusServiceUnavailable, cleanupCode, map[string]string{credentialCleanupFailed: "飞书认证凭据清理失败，请重试", wechatStopFailed: "个人微信采集器停止失败，请重试"}[cleanupCode])
+		return
+	}
+	result, err = pool.Exec(context.WithoutCancel(c), `UPDATE ingestion.collector_bindings SET last_error=NULL,updated_at=now() WHERE source_account_id=$1 AND collector_type=ANY($2::text[])`, accountID, storagePlatforms)
+	if err != nil || result.RowsAffected() == 0 {
+		log.Printf("connector cleanup state update failed: platform=%s user_id=%d source_account_id=%d: %v", platform, c.GetInt64("user_id"), accountID, err)
+		apiError(c, http.StatusServiceUnavailable, cleanupCode, "解绑清理状态保存失败，请重试")
+		return
 	}
 	c.JSON(http.StatusOK, connectorFor(c, pool, c.GetInt64("user_id"), platform))
 }

@@ -413,7 +413,7 @@ func main() {
 					// Some Feishu tenants return only chat_id from the list
 					// endpoint. Resolve the detail resource so the UI can show the
 					// actual chat name and avatar.
-					if name == "" {
+					if name == "" || !chatHasMemberCount(chat) {
 						var detail struct {
 							Data map[string]any `json:"data"`
 						}
@@ -440,7 +440,7 @@ func main() {
 				continue
 			}
 			name := chatDisplayName(chat)
-			if name == "" {
+			if name == "" || !chatHasMemberCount(chat) {
 				var detail struct {
 					Data map[string]any `json:"data"`
 				}
@@ -567,4 +567,43 @@ func chatDisplayName(chat map[string]any) string {
 		}
 	}
 	return ""
+}
+
+// Feishu's /im/v1/chats list response does not consistently include the
+// member count (the detail endpoint exposes it as user_count).  Treat a
+// positive numeric count or a non-empty member array as authoritative; when
+// absent, the caller should hydrate the chat via /im/v1/chats/:id before
+// persisting metadata for the knowledge-base directory.
+func chatHasMemberCount(chat map[string]any) bool {
+	for _, key := range []string{"user_count", "member_count", "members_count", "chat_member_count", "participant_count", "member_num"} {
+		switch value := chat[key].(type) {
+		case float64:
+			if value > 0 {
+				return true
+			}
+		case float32:
+			if value > 0 {
+				return true
+			}
+		case int:
+			if value > 0 {
+				return true
+			}
+		case int64:
+			if value > 0 {
+				return true
+			}
+		case string:
+			var parsed int
+			if _, err := fmt.Sscan(strings.TrimSpace(value), &parsed); err == nil && parsed > 0 {
+				return true
+			}
+		}
+	}
+	for _, key := range []string{"members", "member_list", "chat_members", "users"} {
+		if items, ok := chat[key].([]any); ok && len(items) > 0 {
+			return true
+		}
+	}
+	return false
 }

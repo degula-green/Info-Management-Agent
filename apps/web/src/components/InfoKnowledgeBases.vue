@@ -170,7 +170,8 @@ function openCollectDialog(chat: InfoChat) { collectingChat.value = chat; collec
 function openAccessDialog() {
   accessQuery.value = ''
   accessDialogVisible.value = true
-  emit('refresh-access')
+  // Opening the dialog reads the latest in-memory snapshot. Refreshing the
+  // Feishu directory is an explicit user action via the refresh button.
 }
 function confirmCollect() {
   if (!collectingChat.value) return

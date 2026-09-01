@@ -1016,7 +1016,7 @@ func feishuCallback(c *gin.Context, pool *pgxpool.Pool, redisClient *redisstore.
 	if st.Intent == "rebind" {
 		_, _ = tx.Exec(c, `UPDATE ingestion.collector_bindings b SET enabled=false,updated_at=now()
             FROM ingestion.source_accounts sa WHERE b.source_account_id=sa.id AND sa.internal_account_id=$1 AND sa.platform='feishu'`, st.UserID)
-		_, _ = tx.Exec(c, `UPDATE ingestion.source_accounts SET status='inactive',updated_at=now()
+		_, _ = tx.Exec(c, `UPDATE ingestion.source_accounts SET status='disabled',updated_at=now()
             WHERE internal_account_id=$1 AND platform='feishu'`, st.UserID)
 	}
 	var accountID int64

@@ -16,6 +16,7 @@ export interface Connector {
   display_name: string
   availability: 'available' | 'coming_soon'
   bound: boolean
+  cleanup_pending: boolean
   status: 'unbound' | 'active' | 'paused' | 'error' | 'offline'
   account_name: string | null
   account_avatar_url: string | null
